@@ -243,3 +243,10 @@ class PPORunnerCfg_G1_Gaze_Student(PPORunnerCfg):
         },
     )
     load_run = ".*"
+
+
+@configclass
+class PPORunnerCfg_G1_Gaze_Student_DummyMap(PPORunnerCfg_G1_Gaze_Student):
+    """Same student/algorithm as :class:`PPORunnerCfg_G1_Gaze_Student`, on the dummy neural map."""
+
+    experiment_name = "ame2_g1_gaze_stud_dummymap"

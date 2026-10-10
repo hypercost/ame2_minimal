@@ -10,6 +10,9 @@ from isaaclab.sensors.sensor_base_cfg import SensorBaseCfg
 from isaaclab.utils import configclass
 import isaaclab.sim as sim_utils
 
+from ame2.mapping.grid import LocalGridSpec, fill_isolated_holes, points_to_local_grid
+from ame2.mapping.models import load_mapping_model
+
 from .neural_mapping_utils import LIVOX_HOLE, LivoxGlobalProbWinnerPipeline
 
 
@@ -18,12 +21,27 @@ class LivoxNeuralMapSensor(SensorBase):
 
     Per lidar scan (``update_period``, 10 Hz):
 
-    1. scatter the Mid360 hits into the model input grid: centered at the
+    1. scatter the point cloud into the model input grid: centered at the
        lidar xy, axes = base yaw, heights relative to the lidar z (the frame
        the mapping model was trained in); empty cells = -3;
-    2. run the per-frame mode-selection JIT (mean + log-variance);
+    2. run the per-frame mapping model (mean + log-variance);
     3. fuse into the per-env world-aligned global map, pose-anchored at the
        lidar (xy/z) with base yaw.
+
+    Point source (``cfg.point_source``):
+
+    * ``"lidar"``: the Mid360 ray caster (``cfg.lidar_sensor_name``);
+    * ``"topdown_gt"``: a dense top-down grid ray caster
+      (``cfg.gt_scanner_name``) used as a noise/occlusion-free placeholder
+      point cloud, anchored at ``cfg.origin_body_name`` (the Mid360 link).
+
+    Mapping model (``cfg.model_type``):
+
+    * ``"learned"``: TorchScript file or training checkpoint at ``cfg.jit_model_path``
+      (see ``ame2/scripts/mapping/train_mapping_model.py``);
+    * ``"dummy"``: estimate = input grid, constant variance ``cfg.dummy_variance``.
+      With ``point_source="topdown_gt"`` this is the tuning guide's
+      ground-truth placeholder for building the student pipeline first.
 
     Every :attr:`data` access (each policy step) re-queries the global map on
     the export grid at the current base pose -> base-relative heights + var.
@@ -47,24 +65,33 @@ class LivoxNeuralMapSensor(SensorBase):
         self._query_drift = torch.zeros((self._num_envs, 3), device=self._device)
         self._is_clean_source = torch.zeros(self._num_envs, dtype=torch.bool, device=self._device)
 
-        # pre-trained per-frame TorchScript model; path is relative to the dir holding the ame2 package
-        model_path_abs = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", self.cfg.jit_model_path))
-        if not os.path.isfile(model_path_abs):
-            raise FileNotFoundError(f"Neural mapping model not found: {model_path_abs} (not shipped; set jit_model_path).")
-        self.mapping_model = torch.jit.load(model_path_abs, map_location=self._device).eval()
-        try:
-            self.mapping_model = torch.jit.freeze(self.mapping_model)
-        except RuntimeError:
-            pass  # exported with optimize_for_inference -> already frozen
+        if self.cfg.model_type not in ("learned", "dummy"):
+            raise ValueError(f"model_type must be 'learned' or 'dummy', got {self.cfg.model_type!r}")
+        if self.cfg.point_source not in ("lidar", "topdown_gt"):
+            raise ValueError(f"point_source must be 'lidar' or 'topdown_gt', got {self.cfg.point_source!r}")
+        if self.cfg.model_type == "dummy":
+            self.mapping_model = load_mapping_model("dummy", self._device, dummy_variance=self.cfg.dummy_variance)
+        else:
+            # per-frame model (TorchScript or training checkpoint); a relative path is
+            # resolved against the dir holding the ame2 package
+            model_path_abs = self.cfg.jit_model_path
+            if not os.path.isabs(model_path_abs):
+                model_path_abs = os.path.abspath(
+                    os.path.join(os.path.dirname(__file__), "..", "..", self.cfg.jit_model_path))
+            self.mapping_model = load_mapping_model(model_path_abs, self._device)
+            if isinstance(self.mapping_model, torch.jit.ScriptModule):
+                try:
+                    self.mapping_model = torch.jit.freeze(self.mapping_model)
+                except RuntimeError:
+                    pass  # exported frozen / with optimize_for_inference
 
-        # model input grid: arange over the ranges (inclusive)
-        x0, x1 = self.cfg.gt_x_range
-        y0, y1 = self.cfg.gt_y_range
-        res = self.cfg.res_s
-        xs_s = torch.arange(x0, x1 + 1e-9, res, dtype=torch.float32, device=self._device)
-        ys_s = torch.arange(y0, y1 + 1e-9, res, dtype=torch.float32, device=self._device)
-        self.L_sensor, self.W_sensor = xs_s.shape[0], ys_s.shape[0]
-        self.Xs, self.Ys = torch.meshgrid(xs_s, ys_s, indexing="ij")
+        # model input grid (inclusive cell centres)
+        self.grid_spec = LocalGridSpec(
+            x_range=tuple(self.cfg.gt_x_range), y_range=tuple(self.cfg.gt_y_range),
+            res=self.cfg.res_s, hole_value=LIVOX_HOLE, z_max=2.0,
+        )
+        self.L_sensor, self.W_sensor = self.grid_spec.shape
+        self.Xs, self.Ys = self.grid_spec.axes(self._device)
         # export grid (what the policy/visualization reads), centered on x_mid_b
         self.L_base, self.W_base = self.cfg.L_base, self.cfg.W_base
         xs_b = (torch.arange(self.L_base, dtype=torch.float32) - (self.L_base - 1) / 2) * self.cfg.res_b + self.cfg.x_mid_b
@@ -85,6 +112,8 @@ class LivoxNeuralMapSensor(SensorBase):
         self.last_xyzyaw = torch.zeros((self._num_envs, 4), device=self._device)
         self._is_first_update = torch.ones(self._num_envs, dtype=torch.bool, device=self._device)
         self.data_output = torch.zeros((self._num_envs, self.L_base * self.W_base, 2), device=self._device)
+        # world origin (sensor xyz) of the latest per-frame grid of each env (viz / data collection)
+        self.em_origin_w = torch.zeros((self._num_envs, 3), device=self._device)
 
         if self.cfg.keep_debug_buffers:
             # persistent play-viz buffers (updated per-env as scans come in)
@@ -97,6 +126,10 @@ class LivoxNeuralMapSensor(SensorBase):
         body_name = self.cfg.prim_path.split("/")[-1]
         self._body_idx, _ = self._scene["robot"].find_bodies(body_name)
         self._body_idx = self._body_idx[0]
+        self._origin_body_idx = None
+        if self.cfg.point_source == "topdown_gt":
+            idx, _ = self._scene["robot"].find_bodies(self.cfg.origin_body_name)
+            self._origin_body_idx = idx[0]
 
         if self.cfg.clean_source_ratio > 0:
             self._is_clean_source[:] = torch.rand(self._num_envs, device=self._device) < self.cfg.clean_source_ratio
@@ -220,32 +253,10 @@ class LivoxNeuralMapSensor(SensorBase):
         Returns (n, L_sensor, W_sensor).
         """
         n, R = hits_w.shape[0], hits_w.shape[1]
-        rel = hits_w - sensor_pos_w.unsqueeze(1)                         # (n, R, 3)
-        c = torch.cos(base_yaw).unsqueeze(1)                             # (n, 1)
-        s = torch.sin(base_yaw).unsqueeze(1)
-        lx = c * rel[..., 0] + s * rel[..., 1]                           # world -> base-yaw frame
-        ly = -s * rel[..., 0] + c * rel[..., 1]
-        zr = rel[..., 2]                                                 # lidar-z-relative height
-
-        x0, x1 = self.cfg.gt_x_range
-        y0, y1 = self.cfg.gt_y_range
-        res = self.cfg.res_s
-        L, W = self.L_sensor, self.W_sensor
-        P = L * W
-        valid = (
-            (lx >= x0) & (lx <= x1) & (ly >= y0) & (ly <= y1) & torch.isfinite(zr)
-        )
-
-        ix = torch.round((lx - x0) / res).long().clamp(0, L - 1)
-        iy = torch.round((ly - y0) / res).long().clamp(0, W - 1)
-        cell = ix * W + iy
-        benv = torch.arange(n, device=self._device).unsqueeze(1).expand(n, R)
-        gidx = (benv * P + cell)[valid]
-        grid = torch.full((n * P,), float("-inf"), device=self._device)
-        grid.scatter_reduce_(0, gidx, zr[valid], reduce="amax", include_self=True)
-        grid = grid.view(n, L, W)
-        filled = grid > float("-inf")
-        em = torch.where(filled, grid.clamp(LIVOX_HOLE, 2.0), torch.full_like(grid, LIVOX_HOLE))
+        em, valid = points_to_local_grid(hits_w, sensor_pos_w, base_yaw, self.grid_spec, return_valid=True)
+        if self.cfg.point_source == "topdown_gt" and self.cfg.gt_fill_pinholes:
+            # nearest-cell rounding of a (slightly rotated/shifted) ray lattice leaves pin-holes
+            em = fill_isolated_holes(em, LIVOX_HOLE)
 
         if self.cfg.keep_debug_buffers and ids is not None:
             # persistent per-env viz buffers: replace only the updated envs
@@ -273,11 +284,17 @@ class LivoxNeuralMapSensor(SensorBase):
         base_yaw = self._yaw_from_q(base_quat)                           # (n,)
 
         # fusion pose = lidar origin (xy/z) with base yaw (the model-grid frame)
-        lidar = self._scene.sensors[self.cfg.lidar_sensor_name]
-        lidar_data = lidar.data                                          # triggers the lidar's own update
-        hits_w = lidar_data.ray_hits_w[ids]                              # (n, R, 3)
-        sensor_pos_w = lidar_data.pos_w[ids]                             # (n, 3)
+        if self.cfg.point_source == "lidar":
+            lidar = self._scene.sensors[self.cfg.lidar_sensor_name]
+            lidar_data = lidar.data                                      # triggers the lidar's own update
+            hits_w = lidar_data.ray_hits_w[ids]                          # (n, R, 3)
+            sensor_pos_w = lidar_data.pos_w[ids]                         # (n, 3)
+        else:
+            gt_scanner = self._scene.sensors[self.cfg.gt_scanner_name]
+            hits_w = gt_scanner.data.ray_hits_w[ids]                     # dense top-down "point cloud"
+            sensor_pos_w = robot.data.body_pos_w[ids, self._origin_body_idx]  # Mid360 link origin
         lidar_xyzyaw = torch.cat([sensor_pos_w, base_yaw.unsqueeze(-1)], dim=-1)
+        self.em_origin_w[ids] = sensor_pos_w
 
         em = self._build_em_from_lidar(hits_w, sensor_pos_w, base_yaw, ids)  # (n, L, W)
 
@@ -376,8 +393,28 @@ class LivoxNeuralMapSensorCfg(SensorBaseCfg):
     lidar_sensor_name: str = "lidar_cam"
     """Scene name of the :class:`Mid360RayCaster` providing the scans."""
 
+    model_type: str = "learned"
+    """``"learned"`` (load ``jit_model_path``) or ``"dummy"`` (input grid as estimate, constant variance)."""
+
     jit_model_path: str = "ame2/NN_models/g1LivoxMapping_perframe.pt"
-    """Per-frame mode-selection mapping model (TorchScript)."""
+    """Per-frame mapping model: TorchScript file or a training checkpoint from
+    ``ame2/scripts/mapping/train_mapping_model.py``. Relative paths are resolved
+    against the extension dir (the one holding the ``ame2`` package)."""
+
+    dummy_variance: float = 0.01
+    """Constant variance of the dummy model (guide: "a constant (like 0.01) as the uncertainty")."""
+
+    point_source: str = "lidar"
+    """``"lidar"`` (Mid360 ray caster) or ``"topdown_gt"`` (dense top-down ray caster placeholder)."""
+
+    gt_scanner_name: str = "mapping_gt_scanner"
+    """Scene name of the top-down grid ray caster used when ``point_source="topdown_gt"``."""
+
+    origin_body_name: str = "mid360_link"
+    """Body whose position anchors the local grid when ``point_source="topdown_gt"``."""
+
+    gt_fill_pinholes: bool = True
+    """Close single-cell rasterisation holes of the top-down grid."""
 
     # model input grid (201 x 101 @ 0.03 m)
     gt_x_range: tuple[float, float] = (-3.0, 3.0)

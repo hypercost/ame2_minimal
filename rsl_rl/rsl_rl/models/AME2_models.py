@@ -386,6 +386,10 @@ class AME2LSIOModel(AME2Model):
 
         return prop_latent, attn_out, global_feat
 
+    def as_jit(self) -> nn.Module:
+        """JIT twin with the student (deployment) inputs; the inherited AME2Model twin expects teacher inputs."""
+        return _TorchAME2LSIOModel(self)
+
 
 class AME2GazeModel(AME2Model):
     """TAGA-style active gaze (arXiv:2606.05880) with a dense-attention crop encoder.
@@ -1211,7 +1215,7 @@ class _TorchAME2Model(nn.Module):
         self.mha = copy.deepcopy(model.mha)
         self.output_mlp = copy.deepcopy(model.output_mlp)
 
-        if hasattr(model, "distribution") and model.distribution is not None:
+        if hasattr(getattr(model, "distribution", None), "as_deterministic_output_module"):
             self.deterministic_output = model.distribution.as_deterministic_output_module()
         else:
             self.deterministic_output = nn.Identity()
@@ -1273,7 +1277,7 @@ class _TorchAME2GazeModel(nn.Module):
         self.mha = copy.deepcopy(model.mha)
         self.output_mlp = copy.deepcopy(model.output_mlp)
 
-        if hasattr(model, "distribution") and model.distribution is not None:
+        if hasattr(getattr(model, "distribution", None), "as_deterministic_output_module"):
             self.deterministic_output = model.distribution.as_deterministic_output_module()
         else:
             self.deterministic_output = nn.Identity()
@@ -1338,6 +1342,63 @@ class _TorchAME2GazeModel(nn.Module):
         return actions, attn_out, global_feat, mu
 
 
+class _TorchAME2LSIOModel(nn.Module):
+    """JIT twin for the AME2LSIOModel.
+
+    forward(neural_map (B,L,W,dmap), prop_hist (B,T,prop_dim), cmds (B,cmd_dim))
+    -> (actions, attn_out, global_feat).
+    """
+
+    def __init__(self, model: AME2LSIOModel) -> None:
+        super().__init__()
+        self.dmap = model.dmap
+        self.prop_dim = model.prop_dim
+
+        self.fc_part = copy.deepcopy(model.fc_part)
+        self.cnn_part = copy.deepcopy(model.cnn_part)
+        self.local_proj = copy.deepcopy(model.local_proj)
+        self.global_pool_mlp = copy.deepcopy(model.global_pool_mlp)
+        self.hist_encoder = copy.deepcopy(model.hist_encoder)
+        self.recent_encoder = copy.deepcopy(model.recent_encoder)
+        self.prop_encoder = copy.deepcopy(model.prop_encoder)
+        self.query_mlp = copy.deepcopy(model.query_mlp)
+        self.mha = copy.deepcopy(model.mha)
+        self.output_mlp = copy.deepcopy(model.output_mlp)
+
+        if hasattr(getattr(model, "distribution", None), "as_deterministic_output_module"):
+            self.deterministic_output = model.distribution.as_deterministic_output_module()
+        else:
+            self.deterministic_output = nn.Identity()
+
+    def forward(
+        self, neural_map: torch.Tensor, prop_hist: torch.Tensor, cmds: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        B = prop_hist.shape[0]
+        L = neural_map.shape[1]
+        W = neural_map.shape[2]
+        map_4d = neural_map.view(B, L, W, self.dmap)
+
+        fc_out = self.fc_part(map_4d)
+        cnn_out = self.cnn_part(map_4d[..., 2:].permute(0, 3, 1, 2)).permute(0, 2, 3, 1)
+        local_feat = self.local_proj(torch.cat([fc_out, cnn_out], dim=-1)).view(B, L * W, 96)
+        global_feat, _ = torch.max(self.global_pool_mlp(local_feat), dim=1)
+
+        emb_hist = self.hist_encoder(prop_hist.permute(0, 2, 1))
+        emb_recent = self.recent_encoder(prop_hist[:, -3:, :].reshape(B, 3 * self.prop_dim))
+        prop_latent = self.prop_encoder(torch.cat([emb_hist, emb_recent, cmds], dim=-1))
+
+        query = self.query_mlp(torch.cat([prop_latent, global_feat], dim=-1)).unsqueeze(1)
+        if torch.jit.is_scripting():
+            attn_out, _ = self.mha(query, local_feat, local_feat, need_weights=False)
+        else:
+            attn_out, _ = mha_math(self.mha, query, local_feat, local_feat, need_weights=False)
+        attn_out = attn_out.squeeze(1)
+
+        output = self.output_mlp(torch.cat([attn_out, prop_latent, global_feat], dim=-1))
+        actions = self.deterministic_output(output)
+        return actions, attn_out, global_feat
+
+
 class _TorchAME2GazeLSIOModel(nn.Module):
     """JIT twin for the AME2GazeLSIOModel (hard integer crop; deployment inputs).
 
@@ -1365,7 +1426,7 @@ class _TorchAME2GazeLSIOModel(nn.Module):
         self.mha = copy.deepcopy(model.mha)
         self.output_mlp = copy.deepcopy(model.output_mlp)
 
-        if hasattr(model, "distribution") and model.distribution is not None:
+        if hasattr(getattr(model, "distribution", None), "as_deterministic_output_module"):
             self.deterministic_output = model.distribution.as_deterministic_output_module()
         else:
             self.deterministic_output = nn.Identity()

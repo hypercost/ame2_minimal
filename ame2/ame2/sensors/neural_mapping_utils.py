@@ -114,42 +114,47 @@ class GlobalGrid:
         x_min_new_all = cx - halfspan
         y_min_new_all = cy - halfspan
 
-        for b in torch.nonzero(mask, as_tuple=False).flatten().tolist():
-            x_min_new = x_min_new_all[b]
-            y_min_new = y_min_new_all[b]
-            fb = self.h_bias if fill_world is None else float(fill_world[b].item())
-    
-            # integer cell shifts
-            sx = int(((self.x_min[b] - x_min_new) / res).round().to(torch.int64).item())  # +sx → roll right
-            sy = int(((self.y_min[b] - y_min_new) / res).round().to(torch.int64).item())  # +sy → roll down
+        ids = torch.nonzero(mask, as_tuple=False).flatten()                 # (M,)
+        # integer cell shifts (+sx -> content moves to higher column indices)
+        sx = torch.round((self.x_min[ids] - x_min_new_all[ids]) / res).to(torch.int64)  # (M,)
+        sy = torch.round((self.y_min[ids] - y_min_new_all[ids]) / res).to(torch.int64)
 
-            # Snap the origin to the cell lattice (x_min - sx*res), not to (cx - halfspan):
-            # only whole cells are rolled, so a continuous origin would leave a sub-cell
-            # offset that drifts the rolled map every recenter. The center stays within
-            # half a cell of (cx,cy).
-            self.x_min[b] = self.x_min[b] - sx * self.res
-            self.y_min[b] = self.y_min[b] - sy * self.res
+        # Snap the origin to the cell lattice (x_min - sx*res), not to (cx - halfspan):
+        # only whole cells are shifted, so a continuous origin would leave a sub-cell
+        # offset that drifts the shifted map every recenter. The center stays within
+        # half a cell of (cx,cy).
+        self.x_min[ids] = self.x_min[ids] - sx.to(self.x_min.dtype) * self.res
+        self.y_min[ids] = self.y_min[ids] - sy.to(self.y_min.dtype) * self.res
 
-            if sx == 0 and sy == 0:
-                continue
+        moved = (sx != 0) | (sy != 0)
+        if not bool(moved.any()):
+            return
+        ids, sx, sy = ids[moved], sx[moved], sy[moved]
+        if fill_world is None:
+            fb = torch.full((ids.numel(),), self.h_bias, dtype=self.mean.dtype, device=self.mean.device)
+        else:
+            fb = fill_world[ids]
 
-            # Roll this batch's map
-            m = torch.roll(self.mean[b:b+1], shifts=(sy, sx), dims=(-2, -1))
-            v = torch.roll(self.var[b:b+1],  shifts=(sy, sx), dims=(-2, -1))
+        # Batched shift: out[i, j] = in[i - sy, j - sx]; cells whose source lies
+        # outside the map are the newly uncovered stripes -> prior mean, init var.
+        # (Same result as a per-env torch.roll + stripe fill, but one GPU op for all envs.)
+        Ny, Nx = self.Ny, self.Nx
+        ii = torch.arange(Ny, device=self.mean.device).view(1, Ny, 1)
+        jj = torch.arange(Nx, device=self.mean.device).view(1, 1, Nx)
+        src_i = ii - sy.view(-1, 1, 1)                                      # (M,Ny,1)
+        src_j = jj - sx.view(-1, 1, 1)                                      # (M,1,Nx)
+        inside = (src_i >= 0) & (src_i < Ny) & (src_j >= 0) & (src_j < Nx)  # (M,Ny,Nx)
+        flat_src = (src_i.clamp(0, Ny - 1) * Nx + src_j.clamp(0, Nx - 1)).reshape(ids.numel(), -1)
 
-            # Fill newly uncovered stripes
-            if sx > 0:
-                m[:, :, :, :sx] = fb; v[:, :, :, :sx] = self.init_var
-            elif sx < 0:
-                m[:, :, :, sx:] = fb; v[:, :, :, sx:] = self.init_var
-            if sy > 0:
-                m[:, :, :sy, :] = fb; v[:, :, :sy, :] = self.init_var
-            elif sy < 0:
-                m[:, :, sy:, :] = fb; v[:, :, sy:, :] = self.init_var
+        m_old = self.mean[ids, 0].reshape(ids.numel(), -1)
+        v_old = self.var[ids, 0].reshape(ids.numel(), -1)
+        m_new = torch.gather(m_old, 1, flat_src).view(-1, Ny, Nx)
+        v_new = torch.gather(v_old, 1, flat_src).view(-1, Ny, Nx)
+        m_new = torch.where(inside, m_new, fb.view(-1, 1, 1).to(m_new.dtype))
+        v_new = torch.where(inside, v_new, torch.full_like(v_new, self.init_var))
+        self.mean[ids, 0] = m_new
+        self.var[ids, 0] = v_new
 
-            self.mean[b:b+1] = m
-            self.var[b:b+1]  = v
-    
     @torch.no_grad()
     def reset(self, mask: torch.Tensor, cx: torch.Tensor, cy: torch.Tensor,
               fill_world: torch.Tensor | None = None, yaw: torch.Tensor | None = None,

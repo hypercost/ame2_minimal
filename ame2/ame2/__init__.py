@@ -5,8 +5,14 @@
 
 """AME2 extension package."""
 
-# Register Gym environments.
-from .tasks import *
+import importlib.util as _ilu
 
-# Register UI extensions.
-from .ui_extension_example import *
+# Isaac Lab is required for the tasks/sensors. Without it (e.g. offline mapping-model
+# training or unit tests) only the pure-torch sub-packages (``ame2.mapping``,
+# ``ame2.sensors.neural_mapping_utils``) are importable.
+if _ilu.find_spec("isaaclab") is not None:
+    # Register Gym environments.
+    from .tasks import *
+
+    # Register UI extensions.
+    from .ui_extension_example import *
