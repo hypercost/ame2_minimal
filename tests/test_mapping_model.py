@@ -196,7 +196,8 @@ def test_train_script_end_to_end(tmp_path):
     out = tmp_path / "out"
     export = tmp_path / "exported.pt"
     hist = mod.main([
-        "--data_dir", str(shard_dir), "--synthetic_ratio", "0.5", "--steps", "6", "--clean_steps", "3",
+        "--source", "shards", "--data_dir", str(shard_dir), "--synthetic_ratio", "0.5", "--steps", "6",
+        "--clean_frames", "24",
         "--batch_size", "8", "--device", "cpu", "--out_dir", str(out), "--export", str(export),
         "--log_every", "2", "--val_every", "3",
     ])

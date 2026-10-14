@@ -74,34 +74,60 @@ The codebase is mostly vibecoded, and many IsaacLab know-hows are from Mayank Mi
 | Mid360 noise | identity placeholder | `apply_pointcloud_noise`: 15 % dropped points, 2 % artifacts (App. B); enabled for the student lidar |
 | Student env / PPO_IL / LSIO models / play viz | yes | `Ame2-G1-Gaze-Student-DummyMap(-Play)` tasks; PPO_IL builds the multi-head critic like PPO; clear error if the teacher JIT is missing; JIT twin for `AME2LSIOModel` (it inherited the teacher twin) |
 | Teacher JIT for distillation | not shipped | `ame2/scripts/export_teacher_jit.py` (pure torch, checks JIT == eager) |
-| Mapping model + training | not shipped | `ame2/mapping/` (gated-residual U-Net, beta-NLL + TV re-weighting, augmentations, synthetic terrains), `scripts/mapping/collect_mapping_data.py` (Isaac), `scripts/mapping/train_mapping_model.py` (pure torch) |
+| Mapping model + training | not shipped | `ame2/mapping/` (gated-residual U-Net, beta-NLL + TV re-weighting, augmentations), **Warp ray-tracing sampler** (`warp_sampler.py`, `terrain_meshes.py`, Kit-free), `scripts/mapping/export_terrain_mesh.py` (one-time, Kit), `scripts/mapping/train_mapping_model.py` (Warp + torch), legacy `scripts/mapping/collect_mapping_data.py` (Isaac) |
 | Tests | rsl_rl only | `tests/` (grid projection, fusion/query, mapping model/loss/training, student models + JIT, PPO-IL updates, teacher export) |
 
 ### How to run
 
+Recommended workflow (mapping data per paper Sec. V-B: Warp ray tracing, no physics):
+
 ```bash
-# 0) export the teacher used for distillation and data collection (pure torch; run with Isaac's python
-#    so the TorchScript file matches the torch version that loads it)
+# 0) teacher JIT for distillation (pure torch; use the torch that will load it)
 python ame2/scripts/export_teacher_jit.py --checkpoint modelzoo/g1_gaze_64000env_10h/model_2400.pt
-#    -> ame2/ame2/NN_models/g1_gaze_teacher_isaaclab.jit
 
 # 1) student on the dummy (ground-truth) neural map -- the guide's recommended first step
 ./container/run.sh -g 0 train --task Ame2-G1-Gaze-Student-DummyMap --num_envs 4096
-./container/run.sh -g 0 --gui play --task Ame2-G1-Gaze-Student-DummyMap-Play --checkpoint <model.pt>
 
-# 2) collect (Mid360 grid, ground-truth grid) pairs with the teacher in the loop (inside the container)
-/isaac-sim/python.sh ame2/scripts/mapping/collect_mapping_data.py --headless --num_samples 200000 --out_dir data/mapping
+# 2) one-time: export the locomotion training terrain mesh (needs Kit, headless, a few minutes)
+python ame2/scripts/mapping/export_terrain_mesh.py --headless --out data/mapping/locomotion_terrain.npz
 
-# 3) train the mapping model (pure torch; --data_dir optional, synthetic terrains are mixed in)
-python ame2/scripts/mapping/train_mapping_model.py --data_dir data/mapping --steps 20000
-#    -> logs/mapping/{mapping_ckpt.pt,mapping_model.jit} and ame2/ame2/NN_models/g1LivoxMapping_perframe.pt
+# 3) mapping model: online Warp sampling + training (no Kit; needs `pip install warp-lang`)
+python ame2/scripts/mapping/train_mapping_model.py --benchmark          # measure frames/s -> ETA
+python ame2/scripts/mapping/train_mapping_model.py --locomotion_npz data/mapping/locomotion_terrain.npz
+#    default 54M frames (paper), batch 1024, bf16 on CUDA
+#    -> logs/mapping/{mapping_ckpt.pt,mapping_model.jit} + ame2/ame2/NN_models/g1LivoxMapping_perframe.pt
 
 # 4) student on the learned neural map
 ./container/run.sh -g 0 train --task Ame2-G1-Gaze-Student --num_envs 4096
 
-# unit tests (CPU torch + tensordict + `pip install -e rsl_rl`; no Isaac needed)
+# optional / legacy: record in-sim Mid360 frames with the teacher, then fine-tune on them
+/isaac-sim/python.sh ame2/scripts/mapping/collect_mapping_data.py --headless --num_samples 200000 --out_dir data/mapping/shards
+python ame2/scripts/mapping/train_mapping_model.py --source shards --data_dir data/mapping/shards --frames 5e6
+
+# unit tests (CPU torch + tensordict + warp-lang + `pip install -e rsl_rl`; no Isaac needed)
 python -m pytest tests
 ```
+
+On a local conda Isaac env (e.g. `is51`, torch 2.7 + cu128), long runs can be detached:
+
+```bash
+conda activate is51
+python -c "import warp" || pip install warp-lang   # the Kit-free script needs the warp python package
+mkdir -p logs/mapping
+setsid nohup python ame2/scripts/mapping/train_mapping_model.py \
+    --locomotion_npz data/mapping/locomotion_terrain.npz --out_dir logs/mapping \
+    > logs/mapping/train.log 2>&1 < /dev/null &
+tail -f logs/mapping/train.log
+```
+
+`ame2` no longer auto-imports the Isaac tasks/sensors unless a Kit app is running, so the
+mapping tools work in an env where `isaaclab` is installed but Kit is not started.
+
+**Run time.** The paper reports < 1 h per robot for 54M frames on its 51x31 grid (sampling on a
+single RTX 4090 at "hundreds of thousands of frames per second"). The G1 grid here is 201x101
+(13x more cells, 20k rays per frame), so expect it to be slower; `--benchmark` prints the measured
+frames/s and the resulting ETA for your GPU. Measured here on CPU only (8 cores, no GPU):
+~41 frames/s sampling + ~119 frames/s training at batch 64 -- i.e. CPU is only for tests.
 
 ### Design choices / deviations (where the paper is unspecific)
 
@@ -112,9 +138,18 @@ python -m pytest tests
   small TV floor (1e-3) so flat terrains are not ignored -- the floor is not from the paper.
 - **Augmentations:** height noise, border crop, occlusion, clipping, missing points and outliers; ranges
   are my own. Artifacts are modelled crudely as points pulled in along the ray.
-- **Synthetic data:** procedural 2.5D terrains (slopes, stairs, boxes, pits, stepping stones, rough)
-  with line-of-sight occlusion, as a stand-in/supplement for the paper's mesh sampling; real Isaac
-  data comes from the collection script.
+- **Training data (paper Sec. V-B1/2):** `ame2/mapping/warp_sampler.py` samples random G1 poses
+  (Mid360 0.9-1.45 m above the ground below it, yaw uniform, roll/pitch <= 10 deg) above four
+  mesh families (`terrain_meshes.py`: exported locomotion terrains, stacked boxes, random height
+  fields, floating boxes; mixing weights 0.4/0.2/0.2/0.2, procedural meshes rebuilt every 2000
+  batches). Label = top-down ray per cell starting 2.5 m above the sensor (like the in-sim GT
+  scanner), clamped to [-3, 2]. Input = rays from a jittered sensor pose (+-0.1 m xy, +-0.05 m z),
+  50 % the real Mid360 pattern (random 20k-ray window, sim mount), 50 % a random FOV (90-360 deg
+  azimuth sector, random elevation band); visible hits -> max-z grid (geometric occlusion), then
+  noise / border crop / clipping / missing points / outliers. All ranges are my own; the paper gives
+  none. The grid stays the sensor's G1 grid (201x101 @ 0.03 m, centred on the Mid360, base-yaw
+  axes), not the paper's ANYmal 51x31 @ 4 cm. The old 2.5D synthetic terrains remain as
+  `--source synthetic`.
 - **Ground truth:** a 7 x 4 m top-down grid ray caster on the base (yaw-aligned), anchored at the Mid360
   link; isolated single-cell holes from rasterisation are filled.
 - **Fusion:** unchanged from upstream. Note R_eff = max(R, 0.5 P) halves the variance per winning
@@ -126,8 +161,9 @@ python -m pytest tests
 
 ### Untested / known gaps
 
-- Nothing has been run inside Isaac Sim: sensor integration, new env cfgs/task registration, the data
-  collection script, play visualisation and full training runs are only syntax-checked.
+- Nothing has been run inside Isaac Sim: sensor integration, new env cfgs/task registration, the terrain
+  exporter, the legacy collection script, play visualisation and full training runs are only syntax-checked.
+- The Warp sampler was only run on CPU (warp CPU backend); GPU throughput is unmeasured.
 - The mapping model was only trained for short CPU sanity runs on synthetic data; no checkpoint is shipped.
 - The TorchScript teacher is not committed: export it with the torch version that will load it.
 - Tron1 and the depth neural map are not implemented.

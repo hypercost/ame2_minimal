@@ -5,12 +5,13 @@
 
 """AME2 extension package."""
 
-import importlib.util as _ilu
+from ._kit import kit_running as _kit_running
 
-# Isaac Lab is required for the tasks/sensors. Without it (e.g. offline mapping-model
-# training or unit tests) only the pure-torch sub-packages (``ame2.mapping``,
-# ``ame2.sensors.neural_mapping_utils``) are importable.
-if _ilu.find_spec("isaaclab") is not None:
+# Tasks/sensors need a running Kit app (Isaac Sim). Without it -- no Isaac Lab, or Isaac Lab
+# installed but Kit not started (offline mapping-model training, unit tests) -- only the
+# pure-torch sub-packages (``ame2.mapping``, ``ame2.sensors.neural_mapping_utils``) load.
+# Launch scripts import ``ame2.tasks`` explicitly after AppLauncher, as before.
+if _kit_running():
     # Register Gym environments.
     from .tasks import *
 

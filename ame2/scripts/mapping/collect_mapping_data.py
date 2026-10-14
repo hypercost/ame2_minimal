@@ -1,4 +1,10 @@
-"""Record (Mid360 local grid, ground-truth local grid) pairs by playing the teacher in Isaac Lab.
+"""[LEGACY / OPTIONAL] Record (Mid360 grid, GT grid) pairs by playing the teacher in Isaac Lab.
+
+Not the recommended data path any more: the paper (Sec. V-B1) samples frames with
+Warp ray tracing from random poses, without physics -- see
+``ame2/mapping/warp_sampler.py`` and ``train_mapping_model.py --source warp``.
+Keep this script for optional fine-tuning on the in-sim sensor pipeline
+(``train_mapping_model.py --source shards --data_dir ...``).
 
 Each sample is captured at one robot pose:
 
