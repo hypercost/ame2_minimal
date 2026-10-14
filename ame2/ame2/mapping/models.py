@@ -87,6 +87,12 @@ class GatedResidualUNet(nn.Module):
             self.head.bias[2] = 2.0
 
     def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        mu, logvar, _, _ = self.forward_full(x)
+        return mu, logvar
+
+    @torch.jit.export
+    def forward_full(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """(mu, logvar, raw estimate, gate) -- the gate is 0 on unobserved cells by construction."""
         B, _, L, W = x.shape
         valid = (x > self.hole_value + 0.1).to(x.dtype)
         # heights are sensor-relative (ground ~ -1 m below the Mid360); shift so typical inputs are ~0
@@ -110,7 +116,7 @@ class GatedResidualUNet(nn.Module):
         logvar = self.logvar_min + (self.logvar_max - self.logvar_min) * torch.sigmoid(out[:, 1:2])
         gate = torch.sigmoid(out[:, 2:3]) * valid
         mu = gate * x + (1.0 - gate) * raw
-        return mu, logvar
+        return mu, logvar, raw, gate
 
 
 # ----------------------------------------------------------------------------

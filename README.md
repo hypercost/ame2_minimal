@@ -129,6 +129,55 @@ single RTX 4090 at "hundreds of thousands of frames per second"). The G1 grid he
 frames/s and the resulting ETA for your GPU. Measured here on CPU only (8 cores, no GPU):
 ~41 frames/s sampling + ~119 frames/s training at batch 64 -- i.e. CPU is only for tests.
 
+### Mapping-model validation (4 layers)
+
+Scripts in `ame2/scripts/mapping/eval/`, metrics in `ame2/mapping/eval_metrics.py` (pure torch, unit-tested).
+Layers 1-2 run without Kit; layers 3-4 need Isaac Sim + GPU and **have not been run yet**.
+Long runs: prefix with `setsid nohup ... > log 2>&1 < /dev/null &` (conda env `is51`); all four fit easily in
+~64 GB of GPU memory at the settings below.
+
+```bash
+conda activate is51
+M=ame2/ame2/NN_models/g1LivoxMapping_perframe.pt          # or logs/mapping/mapping_ckpt.pt
+# Layer 1: frozen test set (once), then evaluate / compare checkpoints
+python ame2/scripts/mapping/eval/make_testset.py --frames 20000 --seed 777 \
+    --locomotion_npz data/mapping/locomotion_terrain.npz --out data/mapping/testset_seed777.pt
+python ame2/scripts/mapping/eval/eval_offline.py --testset data/mapping/testset_seed777.pt \
+    --checkpoints $M dummy --out_dir logs/mapping_eval/offline
+# Layer 2: unit scenes (box shadow, stair edge, stepping stones, floating box)
+python ame2/scripts/mapping/eval/unit_scenes.py --checkpoint $M --out_dir logs/mapping_eval/scenes
+# Layer 3: in-loop fused map vs GT (teacher drives on GT; Mid360 + learned model build the map)
+setsid nohup python ame2/scripts/mapping/eval/isaac_map_vs_gt.py --headless --num_envs 256 --steps 3000 \
+    --mapping_model $M --out_dir logs/mapping_eval/inloop_B > logs/mapping_eval/inloop_B.log 2>&1 < /dev/null &
+# Layer 4: closed loop A (GT) / B (learned) / C (raw grid + const var), same seed, one process per mode
+for MODE in A B C; do
+  python ame2/scripts/mapping/eval/closed_loop_abc.py --headless --map_mode $MODE --num_envs 512 \
+      --episodes_per_env 2 --seed 0 --mapping_model $M --out logs/mapping_eval/abc/teacher_$MODE.json
+done
+python ame2/scripts/mapping/eval/compare_abc.py logs/mapping_eval/abc/teacher_*.json
+# final: the same with a student policy JIT (play.py --export) instead of the teacher
+#   ... closed_loop_abc.py --policy student --student_jit <exported_student.jit> --out .../student_$MODE.json
+```
+
+Pass criteria (my proposal; thresholds are not from the paper):
+
+| Layer | Pass if |
+|---|---|
+| 1 offline | observed-cell MAE <= raw-input MAE; hole MAE < min(mean-fill, nearest-fill) overall **and** in each distance bucket (1-3 / 4-8 / >8 cells); within-1σ in [0.55, 0.85] and within-2σ in [0.85, 0.99]; AUSE < 0.5 x the AUSE of a random uncertainty ranking. `summary.md` prints PASS/FAIL per criterion. |
+| 2 scenes | box: mean σ in the shadow >= 2 x σ on visible ground and >= 0.1 m; stair: predicted max step across the edge within ±30 % of the GT 0.17 m; stones: >= 90 % of gap cells predicted > 0.15 m below the stone top or σ > 0.15 m (σ only counts if σ on the stone tops is <= 0.15 m; the dummy model passes this one trivially because holes stay at -3); floating box: report only. All three must pass. |
+| 3 in-loop | observed-cell MAE < 0.05 m; MAE while turning (|yaw rate| > 0.5 rad/s) <= 1.5 x straight; no terrain with jump rate (|ΔMAE| > 5 cm per step) far above the others. |
+| 4 closed loop | B success within 5 points of A overall and on stones / gap / beam / pallets, B fall rate <= A + 5 points, and B clearly better than C on those terrains. |
+
+**Teacher vs. student map observations (checked at runtime by `check_map_compat`).** Both are 26 x 15 grids
+over base-frame x in [-0.5, 1.5], y in [-0.56, 0.56] at 0.08 m, x-major, z = height − base z + 0.74. Differences:
+student z is clipped to [-2, 2] (teacher [-1.5, 1.5]); the student has a 4th uncertainty channel; unseen cells
+are the -2 clip in the student map, while teacher voids are filled with the lowest valid height minus 0.65-1.5 m.
+For the teacher in modes B/C, `neural_to_teacher_map` drops the uncertainty and clips z to [-1.5, 1.5] (unseen
+cells become -1.5, a pit, similar to teacher voids). The teacher therefore ignores σ entirely, which penalises
+B and C relative to a student that was trained to use σ. For a student in mode A, the GT map gets a confident
+variance (0.01). Mode C = dummy model on the Mid360 points: hole pixels are never fused (same rule as for the
+learned model), observed pixels win with variance 0.01.
+
 ### Design choices / deviations (where the paper is unspecific)
 
 - **Mapping network:** shallow 3-level gated-residual U-Net (base 8 channels); inputs = masked height,
@@ -164,6 +213,7 @@ frames/s and the resulting ETA for your GPU. Measured here on CPU only (8 cores,
 - Nothing has been run inside Isaac Sim: sensor integration, new env cfgs/task registration, the terrain
   exporter, the legacy collection script, play visualisation and full training runs are only syntax-checked.
 - The Warp sampler was only run on CPU (warp CPU backend); GPU throughput is unmeasured.
+- Validation layers 3 and 4 (Isaac) are unrun; only their pure logic is unit-tested.
 - The mapping model was only trained for short CPU sanity runs on synthetic data; no checkpoint is shipped.
 - The TorchScript teacher is not committed: export it with the torch version that will load it.
 - Tron1 and the depth neural map are not implemented.

@@ -260,40 +260,64 @@ class WarpMappingSampler:
         return torch.einsum("kij,krj->kri", rot, d)
 
     @torch.no_grad()
-    def sample(self, batch: int, clean: bool = False):
+    def render(self, mi: int, pos: torch.Tensor, yaw: torch.Tensor, clean: bool = False):
+        """Frames at given sensor poses on mesh ``mi``: pos (k,3) Mid360 position, yaw (k,).
+
+        Returns (x, y, label_ok), each (k, L, W).
+        """
+        spec, c = self.spec, self.cfg
+        k = pos.shape[0]
+        pos, yaw = pos.to(self.device).float(), yaw.to(self.device).float()
+        # ground truth: top-down ray per cell (grid frame: sensor xy, base yaw)
+        cy, sy = yaw.cos().view(k, 1, 1), yaw.sin().view(k, 1, 1)
+        gx = pos[:, 0].view(k, 1, 1) + cy * self._cells[..., 0] - sy * self._cells[..., 1]
+        gy = pos[:, 1].view(k, 1, 1) + sy * self._cells[..., 0] + cy * self._cells[..., 1]
+        z0 = (pos[:, 2] + c.gt_start_above_sensor).view(k, 1, 1)
+        zt = topdown(self._wp_meshes[mi], torch.stack([gx, gy], -1), z0)
+        label_ok = torch.isfinite(zt)
+        y = torch.where(label_ok, (zt - pos[:, 2].view(k, 1, 1)).clamp(spec.hole_value, spec.z_max),
+                        torch.full_like(zt, spec.hole_value))
+        # input: rays from a perturbed sensor pose -> visible hits -> max-z grid
+        jit = torch.stack([self._rand(k, -c.sensor_xy_jitter, c.sensor_xy_jitter),
+                           self._rand(k, -c.sensor_xy_jitter, c.sensor_xy_jitter),
+                           self._rand(k, -c.sensor_z_jitter, c.sensor_z_jitter)], -1)
+        hits = raycast(self._wp_meshes[mi], pos + jit, self._ray_dirs(k, yaw), c.max_range)
+        x = points_to_local_grid(hits, pos, yaw, spec)
+        if not clean:
+            aug = augment_inputs(x, spec, c.aug, generator=self.gen)
+            if c.clean_prob > 0:
+                keep = (torch.rand(k, device=self.device, generator=self.gen) < c.clean_prob).view(k, 1, 1)
+                aug = torch.where(keep, x, aug)
+            x = aug
+        return x, y, label_ok
+
+    def family_index(self, name: str) -> int:
+        for i, m in enumerate(self.meshes):
+            if m.name == name:
+                return i
+        raise KeyError(f"mesh family {name!r} not loaded ({[m.name for m in self.meshes]})")
+
+    @torch.no_grad()
+    def sample(self, batch: int, clean: bool = False, family: str | None = None):
+        """Random frames; ``family`` restricts sampling to one mesh family."""
         self._calls += 1
         if self.cfg.remesh_every and self._calls % self.cfg.remesh_every == 0:
             self.regenerate()
-        spec, c = self.spec, self.cfg
-        counts = np.bincount(self.rng.choice(len(self.meshes), size=batch, p=self.weights), minlength=len(self.meshes))
+        if family is not None:
+            counts = np.zeros(len(self.meshes), dtype=np.int64)
+            counts[self.family_index(family)] = batch
+        else:
+            counts = np.bincount(self.rng.choice(len(self.meshes), size=batch, p=self.weights),
+                                 minlength=len(self.meshes))
         xs, ys, ms = [], [], []
         for mi, k in enumerate(counts):
             if k == 0:
                 continue
-            k = int(k)
-            pos, yaw = self._poses(k, mi)
-            # ground truth: top-down ray per cell (grid frame: sensor xy, base yaw)
-            cy, sy = yaw.cos().view(k, 1, 1), yaw.sin().view(k, 1, 1)
-            gx = pos[:, 0].view(k, 1, 1) + cy * self._cells[..., 0] - sy * self._cells[..., 1]
-            gy = pos[:, 1].view(k, 1, 1) + sy * self._cells[..., 0] + cy * self._cells[..., 1]
-            z0 = (pos[:, 2] + c.gt_start_above_sensor).view(k, 1, 1)
-            zt = topdown(self._wp_meshes[mi], torch.stack([gx, gy], -1), z0)
-            label_ok = torch.isfinite(zt)
-            y = torch.where(label_ok, (zt - pos[:, 2].view(k, 1, 1)).clamp(spec.hole_value, spec.z_max),
-                            torch.full_like(zt, spec.hole_value))
-            # input: rays from a perturbed sensor pose -> visible hits -> max-z grid
-            jit = torch.stack([self._rand(k, -c.sensor_xy_jitter, c.sensor_xy_jitter),
-                               self._rand(k, -c.sensor_xy_jitter, c.sensor_xy_jitter),
-                               self._rand(k, -c.sensor_z_jitter, c.sensor_z_jitter)], -1)
-            hits = raycast(self._wp_meshes[mi], pos + jit, self._ray_dirs(k, yaw), c.max_range)
-            x = points_to_local_grid(hits, pos, yaw, spec)
-            if not clean:
-                aug = augment_inputs(x, spec, c.aug, generator=self.gen)
-                if c.clean_prob > 0:
-                    keep = (torch.rand(k, device=self.device, generator=self.gen) < c.clean_prob).view(k, 1, 1)
-                    aug = torch.where(keep, x, aug)
-                x = aug
-            xs.append(x), ys.append(y), ms.append(label_ok)
+            pos, yaw = self._poses(int(k), mi)
+            x, y, ok = self.render(mi, pos, yaw, clean=clean)
+            xs.append(x), ys.append(y), ms.append(ok)
         perm = torch.randperm(batch, device=self.device, generator=self.gen)
+        if family is not None:
+            perm = torch.arange(batch, device=self.device)
         return (torch.cat(xs)[perm].unsqueeze(1), torch.cat(ys)[perm].unsqueeze(1),
                 torch.cat(ms)[perm].unsqueeze(1))
