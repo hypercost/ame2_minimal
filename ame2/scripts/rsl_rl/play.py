@@ -869,9 +869,14 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                             xyz_em = torch.stack([Xw_em, Yw_em, Zw_em], dim=-1).reshape(-1, 3)
                         else:
                             # lidar sensor: grid around the lidar origin (base-yaw axes),
-                            # lidar-z-relative heights, holes = -3; viewed env only, holes masked
-                            lidar = env.unwrapped.scene.sensors[em_cfg.lidar_sensor_name]
-                            lidar_pos = lidar.data.pos_w  # (E, 3)
+                            # lidar-z-relative heights, holes = -3; viewed env only, holes masked.
+                            # em_origin_w = origin of the latest per-frame grid (also valid for the
+                            # top-down placeholder source, where no lidar exists)
+                            if hasattr(nm_sensor, "em_origin_w"):
+                                lidar_pos = nm_sensor.em_origin_w  # (E, 3)
+                            else:
+                                lidar = env.unwrapped.scene.sensors[em_cfg.lidar_sensor_name]
+                                lidar_pos = lidar.data.pos_w  # (E, 3)
                             Xem_f = nm_sensor.Xs.flatten().unsqueeze(0) # (1, Ls*Ws)
                             Yem_f = nm_sensor.Ys.flatten().unsqueeze(0)
 

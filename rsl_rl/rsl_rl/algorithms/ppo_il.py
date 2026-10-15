@@ -5,6 +5,8 @@
 
 from __future__ import annotations
 
+import os
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -48,6 +50,13 @@ class PPO_IL(PPO):
         
         # Teacher model
         self.teacher_path = teacher_path
+        if not os.path.isfile(self.teacher_path):
+            raise FileNotFoundError(
+                f"PPO_IL teacher JIT not found: {self.teacher_path}. Export one from a teacher checkpoint, e.g.\n"
+                "  python ame2/scripts/export_teacher_jit.py "
+                "--checkpoint modelzoo/g1_gaze_64000env_10h/model_2400.pt\n"
+                "or set agent.algorithm.teacher_path=<file>."
+            )
         self.teacher = torch.jit.load(self.teacher_path, map_location=self.device)
         self.teacher.eval() # Teacher is always in eval mode
 
@@ -307,10 +316,19 @@ class PPO_IL(PPO):
         actor: MLPModel = actor_class(obs, cfg["obs_groups"], "actor", env.num_actions, **cfg["actor"]).to(device)
         if cfg["algorithm"].pop("share_cnn_encoders", None):
             cfg["critic"]["cnns"] = actor.cnns
-        critic: MLPModel = critic_class(obs, cfg["obs_groups"], "critic", 1, **cfg["critic"]).to(device)
+        # Multi-head critic, resolved exactly as in PPO.construct_algorithm (one value head per
+        # reward term of the env's reward manager; K = 1 when disabled or without a reward manager).
+        use_mh = cfg["algorithm"].get("multi_head_critic", getattr(alg_class, "_multi_head_critic_default", True))
+        reward_manager = getattr(getattr(env, "unwrapped", env), "reward_manager", None)
+        active_terms = list(getattr(reward_manager, "active_terms", []) or [])
+        num_critic_heads = len(active_terms) if (use_mh and len(active_terms) > 1) else 1
+        critic: MLPModel = critic_class(obs, cfg["obs_groups"], "critic", num_critic_heads, **cfg["critic"]).to(device)
 
         # Initialize the storage
-        storage = RolloutStorage("rl", env.num_envs, cfg["num_steps_per_env"], obs, [env.num_actions], device)
+        storage = RolloutStorage(
+            "rl", env.num_envs, cfg["num_steps_per_env"], obs, [env.num_actions], device,
+            num_reward_components=num_critic_heads,
+        )
 
         # Extract IL config
         alg_cfg = cfg["algorithm"].copy()

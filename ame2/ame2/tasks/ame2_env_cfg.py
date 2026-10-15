@@ -35,6 +35,35 @@ from .terrains import AME2_TERRAINS_CFG_G1  # isort: skip
 
 
 ##
+# Neural-mapping helpers
+##
+
+
+def mapping_gt_scanner_cfg(
+    size: tuple[float, float] = (7.0, 4.0), resolution: float = 0.03, z_offset: float = 3.0, update_period: float = 0.1
+) -> RayCasterCfg:
+    """Dense top-down grid ray caster around the robot (terrain mesh only).
+
+    Used (a) as the noise/occlusion-free placeholder "point cloud" of the dummy
+    neural map (tuning guide: "a local top-down raycaster as a placeholder for
+    camera pointclouds") and (b) as the label source when recording mapping
+    model training data. The grid is yaw-aligned with the base and larger than
+    the 6 x 3 m model grid so it still covers the grid (centred on the Mid360,
+    not on the base) when the torso leans or the waist turns. Note the z offset is
+    rotated by the full base orientation in Isaac Lab, so keep it small.
+    """
+    return RayCasterCfg(
+        prim_path="{ENV_REGEX_NS}/Robot/base",
+        offset=RayCasterCfg.OffsetCfg(pos=(0.0, 0.0, z_offset)),
+        ray_alignment="yaw",
+        pattern_cfg=patterns.GridPatternCfg(resolution=resolution, size=list(size)),
+        mesh_prim_paths=["/World/ground"],
+        update_period=update_period,
+        debug_vis=False,
+    )
+
+
+##
 # Scene definition
 ##
 
@@ -777,6 +806,8 @@ class Ame2EnvCfg_G1_Gaze_Student(Ame2EnvCfg_G1):
             prim_path="{ENV_REGEX_NS}/Robot/mid360_link",
             update_period=1.0 / 10.0,
             mesh_prim_paths=["/World/ground"],
+            # student DR (paper App. B): 15% missing points + 2% artifacts
+            enable_noise=True,
         )
         # 2. Livox neural map (10 Hz accumulate, per-policy-step base query).
         self.scene.neural_map = LivoxNeuralMapSensorCfg(
@@ -785,6 +816,8 @@ class Ame2EnvCfg_G1_Gaze_Student(Ame2EnvCfg_G1):
             query_drift_range=0.03,
             clean_source_ratio=0.1,
             random_pixel_ratio=0.01,
+            # eval: filter_estimation_std=0.15 raised teacher B success 79%->80% and L3 MAE to 0.038
+            filter_estimation_std=0.15,
         )
 
         # --- Student observation groups ---
@@ -841,6 +874,7 @@ class Ame2EnvCfg_G1_Gaze_Student_PLAY(Ame2EnvCfg_G1_PLAY):
             prim_path="{ENV_REGEX_NS}/Robot/base",
             update_period=1.0 / 10.0,
             keep_debug_buffers=True,  # EM-grid/raw-hit viz; play-scale env counts only
+            filter_estimation_std=0.15,
         )
 
         @configclass
@@ -857,3 +891,71 @@ class Ame2EnvCfg_G1_Gaze_Student_PLAY(Ame2EnvCfg_G1_PLAY):
         self.observations.neural_map = NeuralMapObsCfg()
         self.observations.student_prop_hist = ObservationsCfg.StudentPropHistObsCfg()
         self.observations.student_cmds = ObservationsCfg.StudentCmdsObsCfg()
+
+
+##
+# Student with the dummy (ground-truth placeholder) neural map
+##
+
+
+@configclass
+class Ame2EnvCfg_G1_Gaze_Student_DummyMap(Ame2EnvCfg_G1_Gaze_Student):
+    """Gaze student whose neural map comes from the guide's dummy pipeline.
+
+    Point cloud = dense top-down ray caster (no occlusion, no noise), mapping
+    model = identity + constant variance 0.01. Everything downstream (global
+    fusion, recentring, query at the base pose, map DR, PPO+IL) is the real
+    pipeline, so the student can be trained/debugged before a mapping model
+    exists. Swap to :class:`Ame2EnvCfg_G1_Gaze_Student` once a model is trained.
+    """
+
+    def __post_init__(self):
+        super().__post_init__()
+        self.scene.lidar_cam = None  # no Mid360 needed: saves the 20k-ray raycast
+        self.scene.mapping_gt_scanner = mapping_gt_scanner_cfg()
+        self.scene.neural_map.model_type = "dummy"
+        self.scene.neural_map.point_source = "topdown_gt"
+
+
+@configclass
+class Ame2EnvCfg_G1_Gaze_Student_DummyMap_PLAY(Ame2EnvCfg_G1_Gaze_Student_PLAY):
+    """Play cfg for the dummy-map student (map viz via play.py's neural_map overlays)."""
+
+    def __post_init__(self):
+        super().__post_init__()
+        self.scene.lidar_cam = None
+        self.scene.mapping_gt_scanner = mapping_gt_scanner_cfg()
+        self.scene.neural_map.model_type = "dummy"
+        self.scene.neural_map.point_source = "topdown_gt"
+
+
+##
+# Mapping-model data collection
+##
+
+
+@configclass
+class Ame2EnvCfg_G1_MappingCollect(Ame2EnvCfg_G1):
+    """Teacher env + Mid360 lidar + dense top-down label scanner, for recording
+    (lidar grid, ground-truth grid) pairs with ``ame2/scripts/mapping/collect_mapping_data.py``.
+
+    Both ray casters update every policy step (update_period=0) so the pair is
+    always captured at the same pose; the script subsamples the recording rate.
+    Training DR is kept (diverse poses); all terrain levels are used.
+    """
+
+    def __post_init__(self):
+        super().__post_init__()
+        self.scene.num_envs = 256
+        self.scene.terrain.max_init_terrain_level = 9
+        self.scene.lidar_cam = Mid360RayCasterCfg(
+            prim_path="{ENV_REGEX_NS}/Robot/mid360_link",
+            update_period=0.0,
+            mesh_prim_paths=["/World/ground"],
+            enable_noise=False,  # clean inputs; augmentation happens in the training script
+        )
+        self.scene.mapping_gt_scanner = mapping_gt_scanner_cfg(update_period=0.0)
+        # the teacher obs stay noiseless so the played teacher behaves well
+        self.observations.teacher_mapping.enable_corruption = False
+        self.observations.teacher_prop.enable_corruption = False
+        self.curriculum.teacher_mapping_noise = None

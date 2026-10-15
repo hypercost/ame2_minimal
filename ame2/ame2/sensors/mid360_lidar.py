@@ -6,9 +6,12 @@ directions, sensor frame); each scan uses one random contiguous window of
 ``rays_per_scan`` rows (one 0.1 s scan at 10 Hz), shared across all envs
 updated in the same call.
 
-Mid360 sensor artifacts (mixed-pixel ghosts, edge dropout, driver filter,
-near-field pull-ins, ...) are not simulated: :func:`add_noise` is an identity
-placeholder gated by ``Mid360RayCasterCfg.enable_noise``.
+Mid360 sensor artifacts are only modelled crudely: with
+``Mid360RayCasterCfg.enable_noise`` :func:`add_noise` drops a fraction of the
+points and pulls another fraction towards the sensor along the ray (paper
+Appendix B: 15% missing points, 2% artifacts for student training). Real
+Mid360 effects (mixed-pixel ghosts, edge dropout, driver filter, near-field
+pull-ins, ...) are not reproduced.
 """
 
 from __future__ import annotations
@@ -26,6 +29,8 @@ from isaaclab.sensors.ray_caster.ray_cast_utils import obtain_world_pose_from_vi
 from isaaclab.utils import configclass
 from isaaclab.utils.math import combine_frame_transforms, quat_apply
 from isaaclab.utils.warp import raycast_mesh
+
+from ame2.mapping.pointcloud_noise import apply_pointcloud_noise
 
 # Bundled Mid360 scan sequence: (N, 3) fp32 unit ray directions in the sensor
 # frame, in real scan order.
@@ -67,18 +72,22 @@ def add_noise(
     sensor_pos_w: torch.Tensor,
     ray_dirs_w: torch.Tensor,
     enable: bool = False,
+    drop_ratio: float = 0.15,
+    artifact_ratio: float = 0.02,
 ) -> torch.Tensor:
-    """Mid360 artifact model (identity placeholder; returns the hits unchanged).
+    """Mid360 point corruption (see module docstring).
 
     Args:
         ray_hits_w: (E, R, 3) world-frame hit points (misses = inf).
         sensor_pos_w: (E, 3) world sensor origins.
-        ray_dirs_w: (E, R, 3) world ray directions.
-        enable: master switch; False (default) skips everything.
+        ray_dirs_w: (E, R, 3) world ray directions (unused by the current model).
+        enable: master switch; False (default) returns the hits unchanged.
+        drop_ratio: fraction of points turned into misses.
+        artifact_ratio: fraction of points moved towards the sensor along the ray.
     """
     if not enable:
         return ray_hits_w
-    return ray_hits_w
+    return apply_pointcloud_noise(ray_hits_w, sensor_pos_w, drop_ratio=drop_ratio, artifact_ratio=artifact_ratio)
 
 
 def mid360_pattern(cfg: "Mid360PatternCfg", device: str) -> Tuple[torch.Tensor, torch.Tensor]:
@@ -185,7 +194,10 @@ class Mid360RayCaster(RayCaster):
             mesh=RayCaster.meshes[self.cfg.mesh_prim_paths[0]],
         )[0]
         hits[:, :, 2] += self.ray_cast_drift[env_ids, 2].unsqueeze(-1)
-        hits = add_noise(hits, pos_w, ray_dirs_w, enable=self.cfg.enable_noise)
+        hits = add_noise(
+            hits, pos_w, ray_dirs_w, enable=self.cfg.enable_noise,
+            drop_ratio=self.cfg.noise_drop_ratio, artifact_ratio=self.cfg.noise_artifact_ratio,
+        )
         self._data.ray_hits_w[env_ids] = hits
 
         if self.cfg.keep_world_ray_buffers:
@@ -210,7 +222,13 @@ class Mid360RayCasterCfg(RayCasterCfg):
     sensor (slant ranges < ~5 m), so 6 m covers everything the map can use."""
 
     enable_noise: bool = False
-    """Master switch for :func:`add_noise` (currently an identity placeholder)."""
+    """Master switch for :func:`add_noise` (point dropout + artifacts)."""
+
+    noise_drop_ratio: float = 0.15
+    """Fraction of points dropped when ``enable_noise`` (paper App. B: 15%)."""
+
+    noise_artifact_ratio: float = 0.02
+    """Fraction of artifact points when ``enable_noise`` (paper App. B: 2%)."""
 
     keep_world_ray_buffers: bool = False
     """Allocate per-ray world start/direction buffers (2 x E x R x 3 floats —
