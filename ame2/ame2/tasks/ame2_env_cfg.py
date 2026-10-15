@@ -816,6 +816,8 @@ class Ame2EnvCfg_G1_Gaze_Student(Ame2EnvCfg_G1):
             query_drift_range=0.03,
             clean_source_ratio=0.1,
             random_pixel_ratio=0.01,
+            # eval: filter_estimation_std=0.15 raised teacher B success 79%->80% and L3 MAE to 0.038
+            filter_estimation_std=0.15,
         )
 
         # --- Student observation groups ---
@@ -872,6 +874,7 @@ class Ame2EnvCfg_G1_Gaze_Student_PLAY(Ame2EnvCfg_G1_PLAY):
             prim_path="{ENV_REGEX_NS}/Robot/base",
             update_period=1.0 / 10.0,
             keep_debug_buffers=True,  # EM-grid/raw-hit viz; play-scale env counts only
+            filter_estimation_std=0.15,
         )
 
         @configclass
