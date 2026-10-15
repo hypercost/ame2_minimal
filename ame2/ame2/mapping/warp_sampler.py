@@ -164,6 +164,15 @@ class SamplerCfg:
     # through TV reweighting, ~60% of the loss weight. Labels now start at the sensor height, so
     # anything above the head is see-through (it is not traversability-relevant for G1).
     gt_start_above_sensor_by_family: dict = field(default_factory=lambda: {"floating_boxes": 0.0})
+    # Point-cloud corruption on the *rays* before gridding, matching the student-sim lidar
+    # (Mid360RayCasterCfg.enable_noise -> ame2.mapping.pointcloud_noise: 15% drops + 2% hits pulled
+    # towards the sensor along the ray). Without it the model never saw ray-structured artifacts:
+    # in Isaac they land in the Mid360 blind zone around the feet, where max-z keeps them, and the
+    # in-loop map got a +0.13 m bias (diag_simgap). Ratios are drawn per frame.
+    pc_noise_prob: float = 0.8
+    pc_drop_max: float = 0.3
+    pc_artifact_max: float = 0.04
+    pc_artifact_range_frac: tuple[float, float] = (0.2, 0.95)
     clean_prob: float = 0.0                   # fraction of frames without grid augmentations
     aug: AugmentCfg = field(default_factory=AugmentCfg)
 
@@ -297,7 +306,10 @@ class WarpMappingSampler:
         jit = torch.stack([self._rand(k, -c.sensor_xy_jitter, c.sensor_xy_jitter),
                            self._rand(k, -c.sensor_xy_jitter, c.sensor_xy_jitter),
                            self._rand(k, -c.sensor_z_jitter, c.sensor_z_jitter)], -1)
-        hits = raycast(self._wp_meshes[mi], pos + jit, self._ray_dirs(k, yaw), c.max_range)
+        origin = pos + jit
+        hits = raycast(self._wp_meshes[mi], origin, self._ray_dirs(k, yaw), c.max_range)
+        if not clean and c.pc_noise_prob > 0:
+            hits = self._pointcloud_noise(hits, origin)
         x = points_to_local_grid(hits, pos, yaw, spec)
         if not clean:
             aug = augment_inputs(x, spec, c.aug, generator=self.gen)
@@ -306,6 +318,23 @@ class WarpMappingSampler:
                 aug = torch.where(keep, x, aug)
             x = aug
         return x, y, label_ok
+
+    def _pointcloud_noise(self, hits: torch.Tensor, origin: torch.Tensor) -> torch.Tensor:
+        """Per-frame random drops + along-ray artifacts (same model as the sim lidar noise)."""
+        c = self.cfg
+        k, R, _ = hits.shape
+        on = (torch.rand(k, device=self.device, generator=self.gen) < c.pc_noise_prob).view(k, 1)
+        p_drop = self._rand(k, 0.0, c.pc_drop_max).view(k, 1)
+        p_art = self._rand(k, 0.0, c.pc_artifact_max).view(k, 1)
+        finite = torch.isfinite(hits).all(-1)
+        u = torch.rand(k, R, device=self.device, generator=self.gen)
+        art = on & finite & (u < p_art)
+        lo, hi = c.pc_artifact_range_frac
+        frac = lo + (hi - lo) * torch.rand(k, R, 1, device=self.device, generator=self.gen)
+        o = origin.view(k, 1, 3)
+        out = torch.where(art.unsqueeze(-1), o + (hits - o) * frac, hits)
+        drop = on & (torch.rand(k, R, device=self.device, generator=self.gen) < p_drop)
+        return torch.where(drop.unsqueeze(-1), torch.full_like(out, float("nan")), out)
 
     def family_index(self, name: str) -> int:
         for i, m in enumerate(self.meshes):
