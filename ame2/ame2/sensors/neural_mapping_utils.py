@@ -550,10 +550,10 @@ class LivoxGlobalProbWinnerPipeline:
                  abs_accept_var: float = 0.0,           # also let meas with var < this compete (0 = off)
                  device: torch.device = torch.device("cpu")):
         self.device = device
-        # The old hard-coded `R_eff < 0.04` clause let any std<0.2 prediction overwrite a confident
-        # observation with prob. prec_R/(prec_R+prec_P). 63% of the model's blind-zone *inpainted*
-        # cells near the feet have std<0.2 (MAE 0.115), so they kept erasing earlier real
-        # observations: in-loop fused MAE 0.115 vs per-frame observed 0.028 (diag_simgap, no noise).
+        # The old hard-coded `R_eff < 0.04` clause let any std<0.2 prediction compete with a
+        # confident observation regardless of its variance. Removing it is principled but measured
+        # small in-loop (fused MAE 0.115 -> 0.111, diag_simgap no-noise); the dominant fusion error is
+        # inpainted blind-zone cells (see LivoxNeuralMapSensorCfg.filter_estimation_std).
         self.abs_accept_var = float(abs_accept_var)
         # h_bias = hole sentinel: recenter/reset fills (fill_world=None) are void
         self.grid = GlobalGrid(batch_size=batch_size, size_m=size_m, res=res,
