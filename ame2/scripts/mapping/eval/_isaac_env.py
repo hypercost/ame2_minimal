@@ -27,6 +27,12 @@ def make_eval_env(task: str, num_envs: int, device: str, seed: int, map_mode: st
     if mapping_model and not os.path.isabs(mapping_model):
         mapping_model = os.path.abspath(mapping_model)
     mode_info = apply_map_mode(env_cfg.scene.neural_map, map_mode, mapping_model)
+    # ablations: AME2_NM_OVERRIDES="filter_estimation_std=0.15;abs_accept_var=0.04"
+    import ast
+    for kv in filter(None, os.environ.get("AME2_NM_OVERRIDES", "").split(";")):
+        k, v = kv.split("=", 1)
+        setattr(env_cfg.scene.neural_map, k.strip(), ast.literal_eval(v.strip()))
+        mode_info[f"nm.{k.strip()}"] = v.strip()
     # deterministic eval: no DR events, no curricula (terrain levels stay at their random init)
     for name in EVAL_EVENTS_OFF:
         if hasattr(env_cfg.events, name):
