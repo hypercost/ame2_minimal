@@ -547,8 +547,14 @@ class LivoxGlobalProbWinnerPipeline:
                  overwrite_drop_m: float = 0.0,         # stored surface must sit this far above the new pt
                  overwrite_std_max: float = 0.2,        # ... and be confident (std < this) to be protected
                  ground_reject_slope: float = 0.8,      # reject if vertical drop > slope * horizontal dist
+                 abs_accept_var: float = 0.0,           # also let meas with var < this compete (0 = off)
                  device: torch.device = torch.device("cpu")):
         self.device = device
+        # The old hard-coded `R_eff < 0.04` clause let any std<0.2 prediction overwrite a confident
+        # observation with prob. prec_R/(prec_R+prec_P). 63% of the model's blind-zone *inpainted*
+        # cells near the feet have std<0.2 (MAE 0.115), so they kept erasing earlier real
+        # observations: in-loop fused MAE 0.115 vs per-frame observed 0.028 (diag_simgap, no noise).
+        self.abs_accept_var = float(abs_accept_var)
         # h_bias = hole sentinel: recenter/reset fills (fill_world=None) are void
         self.grid = GlobalGrid(batch_size=batch_size, size_m=size_m, res=res,
                                init_var=init_var, device=device, h_bias=hole_value)
@@ -686,7 +692,7 @@ class LivoxGlobalProbWinnerPipeline:
         # --- winner with guards ---
         eps = torch.finfo(m_meas.dtype).eps
         R_eff = torch.maximum(R_meas, self.tau_min * P_prior)
-        better = torch.logical_or(R_eff < P_prior * 1.25, R_eff < 0.04)
+        better = torch.logical_or(R_eff < P_prior * 1.25, R_eff < self.abs_accept_var)
 
         p_meas = torch.zeros_like(R_eff)
         if better.any():

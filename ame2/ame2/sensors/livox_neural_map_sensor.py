@@ -106,6 +106,7 @@ class LivoxNeuralMapSensor(SensorBase):
             overwrite_drop_m=self.cfg.overwrite_drop_m,
             overwrite_std_max=self.cfg.overwrite_std_max,
             ground_reject_slope=self.cfg.ground_reject_slope,
+            abs_accept_var=self.cfg.abs_accept_var,
             device=self._device,
         )
 
@@ -437,6 +438,10 @@ class LivoxNeuralMapSensorCfg(SensorBaseCfg):
     overwrite_drop_m: float = 0.0
     overwrite_std_max: float = 0.2
     ground_reject_slope: float = 0.8
+    abs_accept_var: float = 0.0
+    """Measurements with variance below this always compete with the stored cell (old behaviour:
+    0.04). 0 = only measurements with var < 1.25 x stored var compete, so overconfident inpainted
+    predictions cannot erase real observations."""
 
     void_std: float = 2.7
     """Std assigned to void (-3) model outputs before fusion."""

@@ -166,3 +166,24 @@ def test_partial_env_updates_leave_other_envs_untouched():
     pipe.step(z, z, z, z, torch.full((2, L, W), -1.0), torch.full((2, L, W), math.log(1e-4)), ids=ids)
     assert torch.equal(pipe.grid.mean[[0, 2]], before[[0, 2]])
     assert not torch.equal(pipe.grid.mean[[1, 3]], before[[1, 3]])
+
+
+def test_overconfident_inpaint_cannot_erase_observation():
+    """Regression (diag_simgap): a std~0.15 inpainted guess must not overwrite a std~0.05 observation."""
+    spec = LocalGridSpec(x_range=(-0.3, 0.3), y_range=(-0.3, 0.3), res=0.1)
+    Xs, Ys = spec.axes()
+    zero = torch.zeros(1)
+    L, W = spec.shape
+    for acc, expect_kept in ((0.0, True), (0.04, False)):
+        torch.manual_seed(0)
+        pipe = LivoxGlobalProbWinnerPipeline(Xs, Ys, batch_size=1, res=0.1, size_m=2.1, init_var=10.0,
+                                             tau_min=0.5, abs_accept_var=acc)
+        pipe.seed_episode(torch.tensor([0]), zero, zero, zero, zero)
+        for _ in range(30):   # real observation, var 0.0025
+            pipe.step(zero, zero, zero, zero, torch.full((1, L, W), -1.0), torch.full((1, L, W), math.log(0.0025)))
+        for _ in range(50):   # inpainted guess 0.3 m off, var 0.0225
+            pipe.step(zero, zero, zero, zero, torch.full((1, L, W), -0.7), torch.full((1, L, W), math.log(0.0225)))
+        m = pipe.export_global()[0][0, 0]
+        seen = pipe.export_global()[1][0, 0] < 10.0
+        kept = torch.isclose(m[seen], torch.tensor(-1.0)).float().mean()
+        assert (kept > 0.99) if expect_kept else (kept < 0.5)
