@@ -85,11 +85,20 @@ def _topdown_kernel(
     i = wp.tid()
     p = xy[i]
     z0 = z_start[i]
-    q = wp.mesh_query_ray(mesh, wp.vec3(p[0], p[1], z0), wp.vec3(0.0, 0.0, -1.0), max_dist)
-    if q.result:
-        z_out[i] = z0 - q.t
-    else:
-        z_out[i] = wp.nan
+    # skip back faces: a ray that starts inside a closed box (e.g. a floating box spanning the
+    # label start height) must not report the box *underside* as the surface
+    z = z0
+    left = max_dist
+    z_out[i] = wp.nan
+    for _k in range(8):
+        q = wp.mesh_query_ray(mesh, wp.vec3(p[0], p[1], z), wp.vec3(0.0, 0.0, -1.0), left)
+        if not q.result:
+            break
+        if q.sign >= 0.0:
+            z_out[i] = z - q.t
+            break
+        z = z - q.t - 1.0e-4
+        left = left - q.t - 1.0e-4
 
 
 def raycast(mesh: "wp.Mesh", origins: torch.Tensor, dirs: torch.Tensor, max_dist: float = 30.0) -> torch.Tensor:
@@ -149,6 +158,12 @@ class SamplerCfg:
     # GT rays start this far above the sensor (Isaac's mapping_gt_scanner: base + 3 m ~ sensor + 2.5 m),
     # so overhangs higher than that are "seen through", as in sim
     gt_start_above_sensor: float = 2.5
+    # Per-family override. floating_boxes: boxes up to 3.1 m above the ground hang above the
+    # (downward-looking, upside-down) Mid360; labelling their *tops* while the lidar sees the
+    # ground underneath made 2/3 of the observed cells contradict the input (signed -1.0 m) and,
+    # through TV reweighting, ~60% of the loss weight. Labels now start at the sensor height, so
+    # anything above the head is see-through (it is not traversability-relevant for G1).
+    gt_start_above_sensor_by_family: dict = field(default_factory=lambda: {"floating_boxes": 0.0})
     clean_prob: float = 0.0                   # fraction of frames without grid augmentations
     aug: AugmentCfg = field(default_factory=AugmentCfg)
 
@@ -272,7 +287,8 @@ class WarpMappingSampler:
         cy, sy = yaw.cos().view(k, 1, 1), yaw.sin().view(k, 1, 1)
         gx = pos[:, 0].view(k, 1, 1) + cy * self._cells[..., 0] - sy * self._cells[..., 1]
         gy = pos[:, 1].view(k, 1, 1) + sy * self._cells[..., 0] + cy * self._cells[..., 1]
-        z0 = (pos[:, 2] + c.gt_start_above_sensor).view(k, 1, 1)
+        start = c.gt_start_above_sensor_by_family.get(self.meshes[mi].name, c.gt_start_above_sensor)
+        z0 = (pos[:, 2] + start).view(k, 1, 1)
         zt = topdown(self._wp_meshes[mi], torch.stack([gx, gy], -1), z0)
         label_ok = torch.isfinite(zt)
         y = torch.where(label_ok, (zt - pos[:, 2].view(k, 1, 1)).clamp(spec.hole_value, spec.z_max),
