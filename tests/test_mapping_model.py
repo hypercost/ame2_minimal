@@ -228,3 +228,21 @@ def test_pointcloud_noise_ratios():
     cos = torch.nn.functional.cosine_similarity(hits[moved], out[moved], dim=-1)
     assert (cos > 0.999).all()
     assert torch.equal(apply_pointcloud_noise(hits, origin, 0.0, 0.0), hits)
+
+
+def test_num_levels_jit_and_legacy_keys(tmp_path):
+    import torch
+    from ame2.mapping.models import GatedResidualUNet, export_mapping_jit, load_mapping_model, save_mapping_checkpoint
+    x = torch.full((2, 1, 201, 101), -1.0)
+    for n in (3, 5):
+        m = GatedResidualUNet(base_channels=4, num_levels=n).eval()
+        mu, lv = m(x)
+        assert mu.shape == x.shape
+        p = tmp_path / f"m{n}.pt"
+        export_mapping_jit(m, str(p))
+        assert torch.allclose(load_mapping_model(str(p))(x)[0], mu, atol=1e-5)
+    # old enc0/dec1 naming still loads
+    m = GatedResidualUNet(base_channels=4)
+    sd = {k.replace("enc.0.", "enc0.").replace("up.0.", "dec1."): v for k, v in m.state_dict().items()}
+    torch.save({"model_class": "GatedResidualUNet", "model_cfg": {"base_channels": 4}, "state_dict": sd}, tmp_path / "old.pt")
+    assert torch.allclose(load_mapping_model(str(tmp_path / "old.pt"))(x)[0], m.eval()(x)[0])

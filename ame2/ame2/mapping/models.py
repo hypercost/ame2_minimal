@@ -66,6 +66,7 @@ class GatedResidualUNet(nn.Module):
         height_offset: float = 1.0,
         logvar_min: float = math.log(1e-4),
         logvar_max: float = math.log(10.0),
+        num_levels: int = 3,
     ):
         super().__init__()
         c = int(base_channels)
@@ -75,11 +76,13 @@ class GatedResidualUNet(nn.Module):
         self.logvar_min = float(logvar_min)
         self.logvar_max = float(logvar_max)
 
-        self.enc0 = _block(4, c)
-        self.enc1 = _block(c, 2 * c, stride=2)
-        self.enc2 = _block(2 * c, 4 * c, stride=2)
-        self.dec1 = _block(4 * c + 2 * c, 2 * c)
-        self.dec0 = _block(2 * c + c, c)
+        # num_levels=3 (default, = the original layout): receptive field ~35 cells (~1 m @ 3 cm),
+        # too small to fill the >8-cell occlusion shadows of a 201x101 grid; 4-5 levels reach ~2-4 m.
+        self.num_levels = int(num_levels)
+        ch = [c * 2 ** i for i in range(self.num_levels)]
+        self.enc = nn.ModuleList([_block(4, ch[0])] + [_block(ch[i - 1], ch[i], stride=2) for i in range(1, self.num_levels)])
+        # decoder, deepest first: up[k] produces level num_levels - 2 - k
+        self.up = nn.ModuleList([_block(ch[i + 1] + ch[i], ch[i]) for i in range(self.num_levels - 2, -1, -1)])
         self.head = nn.Conv2d(c, 3, 1)
         # start with an open gate and a mid-range variance
         with torch.no_grad():
@@ -103,14 +106,19 @@ class GatedResidualUNet(nn.Module):
         cy = ys.view(1, 1, 1, W).expand(B, 1, L, W)
         inp = torch.cat([h, valid, cx, cy], dim=1)
 
-        e0 = self.enc0(inp)
-        e1 = self.enc1(e0)
-        e2 = self.enc2(e1)
-        d1 = F.interpolate(e2, size=(e1.shape[2], e1.shape[3]), mode="nearest")
-        d1 = self.dec1(torch.cat([d1, e1], dim=1))
-        d0 = F.interpolate(d1, size=(L, W), mode="nearest")
-        d0 = self.dec0(torch.cat([d0, e0], dim=1))
-        out = self.head(d0)
+        feats: list[torch.Tensor] = []
+        f = inp
+        for blk in self.enc:
+            f = blk(f)
+            feats.append(f)
+        d = feats[-1]
+        k = 0
+        for blk in self.up:
+            skip = feats[self.num_levels - 2 - k]
+            d = F.interpolate(d, size=(skip.shape[2], skip.shape[3]), mode="nearest")
+            d = blk(torch.cat([d, skip], dim=1))
+            k += 1
+        out = self.head(d)
 
         raw = out[:, 0:1] - self.height_offset
         logvar = self.logvar_min + (self.logvar_max - self.logvar_min) * torch.sigmoid(out[:, 1:2])
@@ -150,6 +158,18 @@ def export_mapping_jit(model: nn.Module, path: str) -> None:
     model.train(was_training)
 
 
+def _remap_legacy_keys(sd: dict) -> dict:
+    """enc0/enc1/enc2/dec0/dec1 (pre num_levels checkpoints) -> enc.i / dec.i."""
+    out = {}
+    for k, v in sd.items():
+        for old, new in (("enc0.", "enc.0."), ("enc1.", "enc.1."), ("enc2.", "enc.2."), ("dec1.", "up.0."), ("dec0.", "up.1.")):
+            if k.startswith(old):
+                k = new + k[len(old):]
+                break
+        out[k] = v
+    return out
+
+
 def load_mapping_model(spec: str, device: torch.device | str = "cpu", dummy_variance: float = 0.01) -> nn.Module:
     """Load a per-frame mapping model.
 
@@ -180,5 +200,5 @@ def load_mapping_model(spec: str, device: torch.device | str = "cpu", dummy_vari
         raise ValueError(f"{spec} is neither TorchScript nor a mapping checkpoint with a 'state_dict'.")
     cls = _MODEL_REGISTRY[ckpt.get("model_class", "GatedResidualUNet")]
     model = cls(**ckpt.get("model_cfg", {}))
-    model.load_state_dict(ckpt["state_dict"])
+    model.load_state_dict(_remap_legacy_keys(ckpt["state_dict"]))
     return model.to(device).eval()

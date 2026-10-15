@@ -128,6 +128,7 @@ def main(argv=None):
     p.add_argument("--beta", type=float, default=0.5)
     p.add_argument("--no_tv_reweight", action="store_true")
     p.add_argument("--base_channels", type=int, default=8)
+    p.add_argument("--num_levels", type=int, default=3, help="U-Net levels (3 = original, RF ~1 m; 5 recommended for 201x101)")
     p.add_argument("--amp", action=argparse.BooleanOptionalAction, default=None, help="bf16 autocast (default: on for cuda)")
     p.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     p.add_argument("--out_dir", default="logs/mapping")
@@ -161,7 +162,7 @@ def main(argv=None):
     print(f"[INFO] source {args.source}, grid {spec.shape} @ {spec.res} m, device {device}, bf16 {amp}, "
           f"batch {args.batch_size} x {steps} steps = {steps * args.batch_size / 1e6:.1f}M frames")
 
-    model_cfg = {"base_channels": args.base_channels, "hole_value": spec.hole_value}
+    model_cfg = {"base_channels": args.base_channels, "hole_value": spec.hole_value, "num_levels": args.num_levels}
     model = GatedResidualUNet(**model_cfg).to(device)
     opt = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
     sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=steps, eta_min=args.lr * 0.05)
