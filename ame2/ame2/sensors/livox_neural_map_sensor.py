@@ -3,6 +3,7 @@ from __future__ import annotations
 import math
 import os
 import torch
+import warp as wp
 from collections.abc import Sequence
 
 from isaaclab.sensors.sensor_base import SensorBase
@@ -53,15 +54,11 @@ class LivoxNeuralMapSensor(SensorBase):
         super().__init__(cfg)
 
     def _initialize_impl(self):
-        sim = sim_utils.SimulationContext.instance()
-        self._device = sim.device
+        # IsaacLab 3.0: base init sets device, num_envs (clone plan aware) and the warp
+        # timestamp / outdated / reset-mask buffers used by SensorBase.update/reset.
+        super()._initialize_impl()
         env_prim_path_expr = self.cfg.prim_path.rsplit("/", 1)[0]
         self._parent_prims = sim_utils.find_matching_prims(env_prim_path_expr)
-        self._num_envs = len(self._parent_prims)
-
-        self._is_outdated = torch.ones(self._num_envs, dtype=torch.bool, device=self._device)
-        self._timestamp = torch.zeros(self._num_envs, device=self._device)
-        self._timestamp_last_update = torch.zeros_like(self._timestamp)
         self._query_drift = torch.zeros((self._num_envs, 3), device=self._device)
         self._is_clean_source = torch.zeros(self._num_envs, dtype=torch.bool, device=self._device)
 
@@ -155,8 +152,8 @@ class LivoxNeuralMapSensor(SensorBase):
         self._update_outdated_buffers()
 
         robot = self._scene["robot"]
-        body_pos_w = robot.data.body_pos_w[:, self._body_idx]
-        body_quat_w = robot.data.body_quat_w[:, self._body_idx]
+        body_pos_w = robot.data.body_pos_w.torch[:, self._body_idx]
+        body_quat_w = robot.data.body_quat_w.torch[:, self._body_idx]
         body_yaw = self._yaw_from_q(body_quat_w)  # (E,)
 
         # query at the current base pose -> base-relative heights
@@ -166,7 +163,7 @@ class LivoxNeuralMapSensor(SensorBase):
         if is_clean_any:
             critic_cam = self._scene.sensors.get(self.cfg.critic_sensor_name, None)
             if critic_cam is not None:
-                critic_hits_w = critic_cam.data.ray_hits_w              # (E, R, 3)
+                critic_hits_w = critic_cam.data.ray_hits_w.torch              # (E, R, 3)
                 est_z_clean = critic_hits_w[:, :, 2] - body_pos_w[:, 2].unsqueeze(1)
                 if self.cfg.clean_source_noise > 0:
                     est_z_clean += torch.randn_like(est_z_clean) * self.cfg.clean_source_noise
@@ -203,7 +200,9 @@ class LivoxNeuralMapSensor(SensorBase):
         self.data_output = torch.stack([est_drifted, unc_drifted], dim=-1)
         return self.data_output
 
-    def reset(self, env_ids: Sequence[int] | None = None):
+    def reset(self, env_ids: Sequence[int] | None = None, env_mask: wp.array | None = None):
+        if env_ids is None and env_mask is not None:
+            env_ids = wp.to_torch(env_mask).nonzero(as_tuple=False).squeeze(-1)
         if env_ids is None:
             env_ids = range(self._num_envs)
         env_ids_tensor = torch.as_tensor(env_ids, device=self._device)
@@ -269,7 +268,9 @@ class LivoxNeuralMapSensor(SensorBase):
 
         return em
 
-    def _update_buffers_impl(self, env_ids: Sequence[int]):
+    def _update_buffers_impl(self, env_mask: wp.array):
+        # IsaacLab 3.0: outdated envs arrive as a warp bool mask
+        env_ids = wp.to_torch(env_mask).nonzero(as_tuple=False).squeeze(-1)
         # only the outdated envs (post-reset phases differ per env): fuse exactly
         # one fresh scan per env per update_period. The lidar shares the same
         # per-env phase (timestamps reset together), so these scans are fresh.
@@ -280,20 +281,20 @@ class LivoxNeuralMapSensor(SensorBase):
             return
 
         robot = self._scene["robot"]
-        base_pos = robot.data.body_pos_w[ids, self._body_idx]            # (n, 3)
-        base_quat = robot.data.body_quat_w[ids, self._body_idx]
+        base_pos = robot.data.body_pos_w.torch[ids, self._body_idx]            # (n, 3)
+        base_quat = robot.data.body_quat_w.torch[ids, self._body_idx]
         base_yaw = self._yaw_from_q(base_quat)                           # (n,)
 
         # fusion pose = lidar origin (xy/z) with base yaw (the model-grid frame)
         if self.cfg.point_source == "lidar":
             lidar = self._scene.sensors[self.cfg.lidar_sensor_name]
             lidar_data = lidar.data                                      # triggers the lidar's own update
-            hits_w = lidar_data.ray_hits_w[ids]                          # (n, R, 3)
-            sensor_pos_w = lidar_data.pos_w[ids]                         # (n, 3)
+            hits_w = lidar_data.ray_hits_w.torch[ids]                          # (n, R, 3)
+            sensor_pos_w = lidar_data.pos_w.torch[ids]                         # (n, 3)
         else:
             gt_scanner = self._scene.sensors[self.cfg.gt_scanner_name]
-            hits_w = gt_scanner.data.ray_hits_w[ids]                     # dense top-down "point cloud"
-            sensor_pos_w = robot.data.body_pos_w[ids, self._origin_body_idx]  # Mid360 link origin
+            hits_w = gt_scanner.data.ray_hits_w.torch[ids]                     # dense top-down "point cloud"
+            sensor_pos_w = robot.data.body_pos_w.torch[ids, self._origin_body_idx]  # Mid360 link origin
         lidar_xyzyaw = torch.cat([sensor_pos_w, base_yaw.unsqueeze(-1)], dim=-1)
         self.em_origin_w[ids] = sensor_pos_w
 
@@ -360,11 +361,11 @@ class LivoxNeuralMapSensor(SensorBase):
 
     @staticmethod
     def _yaw_from_q(q: torch.Tensor) -> torch.Tensor:
-        """Extract yaw from quaternion(s) in (w,x,y,z) convention."""
+        """Extract yaw from quaternion(s) in (x,y,z,w) convention (IsaacLab 3.0)."""
         if q.dim() == 1:
-            w, x, y, z = q[0], q[1], q[2], q[3]
+            x, y, z, w = q[0], q[1], q[2], q[3]
         else:
-            w, x, y, z = q[:, 0], q[:, 1], q[:, 2], q[:, 3]
+            x, y, z, w = q[:, 0], q[:, 1], q[:, 2], q[:, 3]
         siny_cosp = 2.0 * (w * z + x * y)
         cosy_cosp = 1.0 - 2.0 * (y * y + z * z)
         return torch.atan2(siny_cosp, cosy_cosp)

@@ -16,7 +16,7 @@ from . import agents
 
 gym.register(
     id="Ame2-G1",
-    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    entry_point=f"{__name__}.env:Ame2ManagerBasedRLEnv",
     disable_env_checker=True,
     kwargs={
         "env_cfg_entry_point": f"{__name__}.ame2_env_cfg:Ame2EnvCfg_G1",
@@ -26,7 +26,7 @@ gym.register(
 
 gym.register(
     id="Ame2-G1-Play",
-    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    entry_point=f"{__name__}.env:Ame2ManagerBasedRLEnv",
     disable_env_checker=True,
     kwargs={
         "env_cfg_entry_point": f"{__name__}.ame2_env_cfg:Ame2EnvCfg_G1_PLAY",
@@ -37,7 +37,7 @@ gym.register(
 
 gym.register(
     id="Ame2-G1-Gaze",
-    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    entry_point=f"{__name__}.env:Ame2ManagerBasedRLEnv",
     disable_env_checker=True,
     kwargs={
         "env_cfg_entry_point": f"{__name__}.ame2_env_cfg:Ame2EnvCfg_G1",
@@ -47,7 +47,7 @@ gym.register(
 
 gym.register(
     id="Ame2-G1-Gaze-Play",
-    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    entry_point=f"{__name__}.env:Ame2ManagerBasedRLEnv",
     disable_env_checker=True,
     kwargs={
         "env_cfg_entry_point": f"{__name__}.ame2_env_cfg:Ame2EnvCfg_G1_PLAY",
@@ -59,7 +59,7 @@ gym.register(
 # the frozen gaze teacher JIT at ``NN_models/g1_gaze_teacher_isaaclab.jit``.
 gym.register(
     id="Ame2-G1-Gaze-Student",
-    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    entry_point=f"{__name__}.env:Ame2ManagerBasedRLEnv",
     disable_env_checker=True,
     kwargs={
         "env_cfg_entry_point": f"{__name__}.ame2_env_cfg:Ame2EnvCfg_G1_Gaze_Student",
@@ -69,7 +69,7 @@ gym.register(
 
 gym.register(
     id="Ame2-G1-Gaze-Student-Play",
-    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    entry_point=f"{__name__}.env:Ame2ManagerBasedRLEnv",
     disable_env_checker=True,
     kwargs={
         "env_cfg_entry_point": f"{__name__}.ame2_env_cfg:Ame2EnvCfg_G1_Gaze_Student_PLAY",
@@ -82,7 +82,7 @@ gym.register(
 # without a trained mapping model.
 gym.register(
     id="Ame2-G1-Gaze-Student-DummyMap",
-    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    entry_point=f"{__name__}.env:Ame2ManagerBasedRLEnv",
     disable_env_checker=True,
     kwargs={
         "env_cfg_entry_point": f"{__name__}.ame2_env_cfg:Ame2EnvCfg_G1_Gaze_Student_DummyMap",
@@ -92,7 +92,7 @@ gym.register(
 
 gym.register(
     id="Ame2-G1-Gaze-Student-DummyMap-Play",
-    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    entry_point=f"{__name__}.env:Ame2ManagerBasedRLEnv",
     disable_env_checker=True,
     kwargs={
         "env_cfg_entry_point": f"{__name__}.ame2_env_cfg:Ame2EnvCfg_G1_Gaze_Student_DummyMap_PLAY",
@@ -103,7 +103,7 @@ gym.register(
 # Teacher env + Mid360 + top-down label scanner for mapping-model data collection
 gym.register(
     id="Ame2-G1-Mapping-Collect",
-    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    entry_point=f"{__name__}.env:Ame2ManagerBasedRLEnv",
     disable_env_checker=True,
     kwargs={
         "env_cfg_entry_point": f"{__name__}.ame2_env_cfg:Ame2EnvCfg_G1_MappingCollect",

@@ -40,19 +40,19 @@ Root state.
 def ame2_base_lin_vel(env: ManagerBasedEnv, asset_cfg: SceneEntityCfg = SceneEntityCfg("robot")) -> torch.Tensor:
     """Root linear velocity in the asset's root frame."""
     asset: RigidObject = env.scene[asset_cfg.name]
-    return asset.data.root_lin_vel_b
+    return asset.data.root_lin_vel_b.torch
 
 
 def ame2_base_ang_vel(env: ManagerBasedEnv, asset_cfg: SceneEntityCfg = SceneEntityCfg("robot")) -> torch.Tensor:
     """Root angular velocity in the asset's root frame."""
     asset: RigidObject = env.scene[asset_cfg.name]
-    return asset.data.root_ang_vel_b
+    return asset.data.root_ang_vel_b.torch
 
 
 def ame2_projected_gravity(env: ManagerBasedEnv, asset_cfg: SceneEntityCfg = SceneEntityCfg("robot")) -> torch.Tensor:
     """Gravity projection on the asset's root frame."""
     asset: RigidObject = env.scene[asset_cfg.name]
-    return asset.data.projected_gravity_b
+    return asset.data.projected_gravity_b.torch
 
 
 
@@ -69,7 +69,7 @@ Joint state.
 def ame2_joint_pos_rel(env: ManagerBasedEnv, asset_cfg: SceneEntityCfg = SceneEntityCfg("robot")) -> torch.Tensor:
     """The joint positions of the asset w.r.t. the default joint positions."""
     extract_asset: Articulation = env.scene[asset_cfg.name]
-    return extract_asset.data.joint_pos[:, asset_cfg.joint_ids] - extract_asset.data.default_joint_pos[:, asset_cfg.joint_ids]
+    return extract_asset.data.joint_pos.torch[:, asset_cfg.joint_ids] - extract_asset.data.default_joint_pos.torch[:, asset_cfg.joint_ids]
 
 
 
@@ -78,7 +78,7 @@ def ame2_joint_pos_rel(env: ManagerBasedEnv, asset_cfg: SceneEntityCfg = SceneEn
 def ame2_joint_vel_rel(env: ManagerBasedEnv, asset_cfg: SceneEntityCfg = SceneEntityCfg("robot")) -> torch.Tensor:
     """The joint velocities of the asset w.r.t. the default joint velocities."""
     extract_asset: Articulation = env.scene[asset_cfg.name]
-    return extract_asset.data.joint_vel[:, asset_cfg.joint_ids] - extract_asset.data.default_joint_vel[:, asset_cfg.joint_ids]
+    return extract_asset.data.joint_vel.torch[:, asset_cfg.joint_ids] - extract_asset.data.default_joint_vel.torch[:, asset_cfg.joint_ids]
 
 
 """
@@ -94,7 +94,7 @@ def ame2_height_scan(
 ) -> torch.Tensor:
     """Height scan from the ray-caster sensor."""
     sensor: RayCaster = env.scene[sensor_cfg.name]
-    z = sensor.data.ray_hits_w[..., 2] - sensor.data.pos_w[:, 2].unsqueeze(1) + offset
+    z = sensor.data.ray_hits_w.torch[..., 2] - sensor.data.pos_w.torch[:, 2].unsqueeze(1) + offset
 
     # fill voids (inf/nan) with the lowest valid height plus a random per-env bias
     is_valid = torch.isfinite(z)
@@ -112,7 +112,7 @@ def ame2_height_scan(
         z = torch.where(is_valid, z, min_valid_z + bias)
         
     # processed world-frame heights, used for visualization
-    sensor.data._processed_z_w = (z + sensor.data.pos_w[:, 2].unsqueeze(1) - offset).detach()
+    sensor.data._processed_z_w = (z + sensor.data.pos_w.torch[:, 2].unsqueeze(1) - offset).detach()
     
     return z
 
@@ -131,7 +131,7 @@ def ame2_teacher_mapping(env: ManagerBasedEnv,
     """
     sensor: RayCaster = env.scene[sensor_cfg.name]
     # hit height relative to the sensor, plus offset
-    z = sensor.data.ray_hits_w[..., 2] - sensor.data.pos_w[:, 2].unsqueeze(1) + offset
+    z = sensor.data.ray_hits_w.torch[..., 2] - sensor.data.pos_w.torch[:, 2].unsqueeze(1) + offset
     
     # fill voids (inf/nan) with the lowest valid height plus a random per-env bias
     is_valid = torch.isfinite(z)
@@ -148,7 +148,7 @@ def ame2_teacher_mapping(env: ManagerBasedEnv,
         z = torch.where(is_valid, z, min_valid_z + bias)
 
     # processed world-frame heights, used for visualization
-    sensor.data._processed_z_w = (z + sensor.data.pos_w[:, 2].unsqueeze(1) - offset).detach()
+    sensor.data._processed_z_w = (z + sensor.data.pos_w.torch[:, 2].unsqueeze(1) - offset).detach()
 
     if clip_z is not None:
         z = torch.clamp(z, min=clip_z[0], max=clip_z[1])
@@ -333,7 +333,7 @@ def ame2_contact_states(
         asset: Articulation = env.scene[asset_cfg.name]
         sensor: ContactSensor = env.scene[sensor_cfg.name]
 
-        body_masses = asset.data.default_mass[0]  # (num_bodies,)
+        body_masses = asset.data.default_mass.torch[0]  # (num_bodies,)
         body_names = asset.data.body_names
         sensor_body_names = sensor.body_names
 
@@ -365,14 +365,14 @@ def ame2_contact_states(
             if hname in sensor_body_names:
                 indices.append(sensor_body_names.index(hname))
         env._ame2_contact_sensor_indices[key] = torch.tensor(
-            indices, device=sensor.data.net_forces_w.device, dtype=torch.long
+            indices, device=sensor.data.net_forces_w.torch.device, dtype=torch.long
         )
 
     sensor_indices = env._ame2_contact_sensor_indices[key]
 
     sensor: ContactSensor = env.scene[sensor_cfg.name]
     # net_forces_w_history shape: (num_envs, history_length, num_bodies, 3)
-    selected_forces = sensor.data.net_forces_w_history[:, :, sensor_indices, :]
+    selected_forces = sensor.data.net_forces_w_history.torch[:, :, sensor_indices, :]
     # max force norm across history -> (num_envs, num_selected)
     contact_force_norms = torch.max(torch.norm(selected_forces, dim=-1), dim=1)[0]
     contact_states = (contact_force_norms > force_threshold).float()

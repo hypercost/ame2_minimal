@@ -21,7 +21,12 @@ from isaaclab.sensors import ContactSensorCfg, RayCasterCfg, patterns
 from isaaclab.terrains import TerrainImporterCfg
 from isaaclab.utils import configclass
 from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR, ISAACLAB_NUCLEUS_DIR
-from isaaclab.utils.noise import AdditiveUniformNoiseCfg as Unoise
+from isaaclab.utils.noise import UniformNoiseCfg as Unoise  # IsaacLab 3.0: Additive* renamed
+from isaaclab.physics import PhysxAutoCfg
+from isaaclab_ov.physics import OvPhysxCfg
+from isaaclab_physx.physics import PhysxCfg
+
+from isaaclab_tasks.utils import PresetCfg
 
 from . import mdp
 from ame2.assets.unitree import G1_CFG  # isort: skip
@@ -32,6 +37,17 @@ from ame2.sensors.livox_neural_map_sensor import LivoxNeuralMapSensorCfg  # isor
 # Pre-defined configs
 ##
 from .terrains import AME2_TERRAINS_CFG_G1  # isort: skip
+
+
+@configclass
+class Ame2PhysicsCfg(PresetCfg):
+    """Physics backend presets (IsaacLab 3.0). Select with ``physics=ovphysx`` (kitless) or ``physics=isaacsim_physx``."""
+
+    # the default 2**26 collision stack overflows at ~12k envs
+    isaacsim_physx = PhysxCfg(gpu_max_rigid_patch_count=20 * 2**15, gpu_collision_stack_size=2**27)
+    ovphysx = OvPhysxCfg(gpu_max_rigid_patch_count=20 * 2**15, gpu_collision_stack_size=2**27)
+    physx = PhysxAutoCfg(isaacsim_physx=isaacsim_physx, ovphysx=ovphysx)
+    default = ovphysx
 
 
 ##
@@ -706,9 +722,7 @@ class Ame2EnvCfg_G1(ManagerBasedRLEnvCfg):
         self.sim.dt = 0.005
         self.sim.render_interval = self.decimation
         self.sim.physics_material = self.scene.terrain.physics_material
-        self.sim.physx.gpu_max_rigid_patch_count = 20 * 2**15
-        # the default 2**26 collision stack overflows at ~12k envs
-        self.sim.physx.gpu_collision_stack_size = 2**27
+        self.sim.physics = Ame2PhysicsCfg()
         # update sensor update periods
         if self.scene.height_scanner is not None:
             self.scene.height_scanner.update_period = self.decimation * self.sim.dt

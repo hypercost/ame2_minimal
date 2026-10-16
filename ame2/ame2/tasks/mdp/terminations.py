@@ -59,11 +59,11 @@ def ame2_bad_orientation(
     
     if hasattr(asset.data, "body_link_quat_w") and len(asset_cfg.body_ids) == 1:
         # compute the orientation of the specific body
-        body_quat_w = asset.data.body_link_quat_w[:, asset_cfg.body_ids[0]]
-        gravity_b = math_utils.quat_apply_inverse(body_quat_w, asset.data.GRAVITY_VEC_W)
+        body_quat_w = asset.data.body_link_quat_w.torch[:, asset_cfg.body_ids[0]]
+        gravity_b = math_utils.quat_apply_inverse(body_quat_w, asset.data.GRAVITY_VEC_W.torch)
     else:
         # fallback to root orientation
-        gravity_b = asset.data.projected_gravity_b
+        gravity_b = asset.data.projected_gravity_b.torch
 
     # specific criteria using parameters
     bad_x = gravity_b[:, 0].abs() > limit_gx
@@ -93,7 +93,7 @@ def ame2_illegal_contact(
     # extract the used quantities (to enable type-hinting)
     contact_sensor: ContactSensor = env.scene.sensors[sensor_cfg.name]
 
-    net_contact_forces = contact_sensor.data.net_forces_w_history[:, :, sensor_cfg.body_ids, :]
+    net_contact_forces = contact_sensor.data.net_forces_w_history.torch[:, :, sensor_cfg.body_ids, :]
 
     # average across history and then per-body norm
     # shape: (num_envs, num_bodies)
@@ -141,7 +141,7 @@ def ame2_body_lin_acc_out_of_limit(
 
     else:
         # fall back to the PhysX body acceleration
-        body_accs = asset.data.body_lin_acc_w[:, body_ids, :]
+        body_accs = asset.data.body_lin_acc_w.torch[:, body_ids, :]
         print('alert:using physx acceleration')
 
     # vertical acceleration magnitude
@@ -163,7 +163,7 @@ def ame2_body_lin_acc_out_of_limit(
         assert len(body_ids) == len(foot_ids), f"Number of bodies ({len(body_ids)}) and feet ({len(foot_ids)}) must match!"
 
         # get contact forces history: (num_envs, history_length, num_feet, 3)
-        net_contact_forces = contact_sensor.data.net_forces_w_history[:, :, foot_ids, :]
+        net_contact_forces = contact_sensor.data.net_forces_w_history.torch[:, :, foot_ids, :]
         # max force over history: (num_envs, num_feet)
         max_forces = torch.max(torch.norm(net_contact_forces, dim=-1), dim=1).values
         foot_in_contact = max_forces > sensor_threshold
@@ -197,13 +197,13 @@ def ame2_stagnation(
 
     # initialize buffers if not present on the env
     if not hasattr(env, "ame2_stagnation_last_pos"):
-        env.ame2_stagnation_last_pos = asset.data.root_pos_w.clone()
+        env.ame2_stagnation_last_pos = asset.data.root_pos_w.torch.clone()
         env.ame2_stagnation_last_check_time = current_time.clone()
 
     # reset buffers for new episodes
     reset_ids = (env.episode_length_buf <= 1).nonzero(as_tuple=False).flatten()
     if len(reset_ids) > 0:
-        env.ame2_stagnation_last_pos[reset_ids] = asset.data.root_pos_w[reset_ids]
+        env.ame2_stagnation_last_pos[reset_ids] = asset.data.root_pos_w.torch[reset_ids]
         env.ame2_stagnation_last_check_time[reset_ids] = current_time[reset_ids]
 
     # check if time window has passed for each environment
@@ -214,7 +214,7 @@ def ame2_stagnation(
 
     if len(check_ids) > 0:
         # compute distance moved since last check
-        dist_moved = torch.norm(asset.data.root_pos_w[check_ids] - env.ame2_stagnation_last_pos[check_ids], dim=1)
+        dist_moved = torch.norm(asset.data.root_pos_w.torch[check_ids] - env.ame2_stagnation_last_pos[check_ids], dim=1)
         
         # check distance to goal
         command = env.command_manager.get_command(command_name)
@@ -224,7 +224,7 @@ def ame2_stagnation(
         stagnant[check_ids] = (dist_moved < distance_threshold) & (d_xy > goal_distance_threshold)
         
         # update snapshots
-        env.ame2_stagnation_last_pos[check_ids] = asset.data.root_pos_w[check_ids]
+        env.ame2_stagnation_last_pos[check_ids] = asset.data.root_pos_w.torch[check_ids]
         env.ame2_stagnation_last_check_time[check_ids] = current_time[check_ids]
 
     return stagnant

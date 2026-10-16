@@ -11,6 +11,7 @@ import scipy.interpolate as interpolate
 import scipy.ndimage as ndimage
 from isaaclab.terrains import SubTerrainBaseCfg
 from isaaclab.terrains.height_field.hf_terrains_cfg import HfTerrainBaseCfg
+from isaaclab.terrains.height_field.hf_terrains import _terrain_origin  # IsaacLab 3.0: hf funcs return (hf, origin)
 from isaaclab.terrains.height_field.utils import height_field_to_mesh
 from isaaclab.terrains.trimesh.utils import make_border
 from isaaclab.utils import configclass
@@ -110,7 +111,7 @@ class RoughTerrainCfg(HfTerrainBaseCfg):
     undulation_res: float = 2.0  # Resolution of low-frequency undulations in meters
 
 @height_field_to_mesh
-def rough_terrain(difficulty: float, cfg: RoughTerrainCfg) -> np.ndarray:
+def rough_terrain(difficulty: float, cfg: RoughTerrainCfg) -> tuple[np.ndarray, np.ndarray]:
     """Custom rough terrain with slopes and noise conditioned on difficulty."""
     # 1. Resolve parameters based on difficulty
     target_slope_deg = difficulty * cfg.max_slope_deg
@@ -153,7 +154,8 @@ def rough_terrain(difficulty: float, cfg: RoughTerrainCfg) -> np.ndarray:
     # 5. Combine and Discretize
     hf_total = hf_undulations + hf_noise
     
-    return np.rint(hf_total / cfg.vertical_scale).astype(np.int16)
+    hf_int = np.rint(hf_total / cfg.vertical_scale).astype(np.int16)
+    return hf_int, _terrain_origin(hf_int, cfg)
 
 @configclass
 class PyramidStairsCfg(SubTerrainBaseCfg):
@@ -367,7 +369,7 @@ class BoxesTerrainCfg(HfTerrainBaseCfg):
     dilation_size: float = 0.1  # Dilation to avoid narrow walls/gaps
 
 @height_field_to_mesh
-def boxes_terrain(difficulty: float, cfg: BoxesTerrainCfg) -> np.ndarray:
+def boxes_terrain(difficulty: float, cfg: BoxesTerrainCfg) -> tuple[np.ndarray, np.ndarray]:
     """Generate a custom boxes height field terrain."""
     # 1. Dimensions
     num_rows = int(cfg.size[0] / cfg.horizontal_scale)
@@ -415,7 +417,8 @@ def boxes_terrain(difficulty: float, cfg: BoxesTerrainCfg) -> np.ndarray:
     c_start = (num_cols - p_cols) // 2
     hf[r_start:r_start+p_rows, c_start:c_start+p_cols] = 0.0
     
-    return np.rint(hf / cfg.vertical_scale).astype(np.int16)
+    hf_int = np.rint(hf / cfg.vertical_scale).astype(np.int16)
+    return hf_int, _terrain_origin(hf_int, cfg)
 
 @configclass
 class ObstaclesTerrainCfg(HfTerrainBaseCfg):
@@ -429,7 +432,7 @@ class ObstaclesTerrainCfg(HfTerrainBaseCfg):
     dilation_size: float = 0.1  # Dilation for obstacles
 
 @height_field_to_mesh
-def obstacles_terrain(difficulty: float, cfg: ObstaclesTerrainCfg) -> np.ndarray:
+def obstacles_terrain(difficulty: float, cfg: ObstaclesTerrainCfg) -> tuple[np.ndarray, np.ndarray]:
     """Generate a custom obstacles height field terrain."""
     # 1. Resolve parameters
     num_rows = int(cfg.size[0] / cfg.horizontal_scale)
@@ -503,7 +506,8 @@ def obstacles_terrain(difficulty: float, cfg: ObstaclesTerrainCfg) -> np.ndarray
     # 5. Combine slopes and dilated obstacles
     hf += hf_obs
     
-    return np.rint(hf / cfg.vertical_scale).astype(np.int16)
+    hf_int = np.rint(hf / cfg.vertical_scale).astype(np.int16)
+    return hf_int, _terrain_origin(hf_int, cfg)
 
 @configclass
 class ClimbDownCfg(ClimbUpCfg):
