@@ -55,18 +55,18 @@ class SafeTerrainBasedPose2dCommand(TerrainBasedPose2dCommand):
                 self.pos_command_w[env_id] = patches[idx[0]]
 
         # offset the position command by the current root height
-        self.pos_command_w[env_ids, 2] += self.robot.data.default_root_state[env_ids, 2]
+        self.pos_command_w[env_ids, 2] += self.robot.data.default_root_state.torch[env_ids, 2]
 
         if self.cfg.simple_heading:
             # set heading command to point towards target
-            target_vec = self.pos_command_w[env_ids] - self.robot.data.root_pos_w[env_ids]
+            target_vec = self.pos_command_w[env_ids] - self.robot.data.root_pos_w.torch[env_ids]
             target_direction = torch.atan2(target_vec[:, 1], target_vec[:, 0])
             flipped_target_direction = wrap_to_pi(target_direction + torch.pi)
 
             # compute errors to find the closest direction to the current heading
             # this is done to avoid the discontinuity at the -pi/pi boundary
-            curr_to_target = wrap_to_pi(target_direction - self.robot.data.heading_w[env_ids]).abs()
-            curr_to_flipped_target = wrap_to_pi(flipped_target_direction - self.robot.data.heading_w[env_ids]).abs()
+            curr_to_target = wrap_to_pi(target_direction - self.robot.data.heading_w.torch[env_ids]).abs()
+            curr_to_flipped_target = wrap_to_pi(flipped_target_direction - self.robot.data.heading_w.torch[env_ids]).abs()
 
             # set the heading command to the closest direction
             self.heading_command_w[env_ids] = torch.where(

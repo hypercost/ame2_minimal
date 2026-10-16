@@ -23,12 +23,14 @@ import torch
 from collections.abc import Sequence
 from typing import Callable, Tuple
 
+import warp as wp
+
 from isaaclab.sensors import RayCaster, RayCasterCfg
+from isaaclab.sensors.ray_caster.base_ray_caster import BaseRayCaster
 from isaaclab.sensors.ray_caster.patterns.patterns_cfg import PatternBaseCfg
-from isaaclab.sensors.ray_caster.ray_cast_utils import obtain_world_pose_from_view
 from isaaclab.utils import configclass
 from isaaclab.utils.math import combine_frame_transforms, quat_apply
-from isaaclab.utils.warp import raycast_mesh
+from isaaclab.utils.warp import ProxyArray, raycast_mesh
 
 from ame2.mapping.pointcloud_noise import apply_pointcloud_noise
 
@@ -49,18 +51,21 @@ _USD_MID360_JOINT_PITCH = 2.0 * math.atan2(0.02006994, 0.9997986)
 
 
 def _mid360_mount_offset_rot() -> Tuple[float, float, float, float]:
-    """Quaternion (w,x,y,z) of Ry(bias_pitch - usd_joint_pitch) @ Rx(pi)."""
+    """Quaternion (x,y,z,w) of Ry(bias_pitch - usd_joint_pitch) @ Rx(pi).
+
+    IsaacLab 3.0 uses XYZW quaternions everywhere (2.x: WXYZ); the product is computed in WXYZ
+    below and returned reordered.
+    """
     half_p = 0.5 * (_SENSOR_BIAS_PITCH - _USD_MID360_JOINT_PITCH)
     qy = (math.cos(half_p), 0.0, math.sin(half_p), 0.0)
     qx = (math.cos(0.5 * _SENSOR_BIAS_ROLL), math.sin(0.5 * _SENSOR_BIAS_ROLL), 0.0, 0.0)
     w1, x1, y1, z1 = qy
     w2, x2, y2, z2 = qx
-    return (
-        w1 * w2 - x1 * x2 - y1 * y2 - z1 * z2,
-        w1 * x2 + x1 * w2 + y1 * z2 - z1 * y2,
-        w1 * y2 - x1 * z2 + y1 * w2 + z1 * x2,
-        w1 * z2 + x1 * y2 - y1 * x2 + z1 * w2,
-    )
+    w = w1 * w2 - x1 * x2 - y1 * y2 - z1 * z2
+    x = w1 * x2 + x1 * w2 + y1 * z2 - z1 * y2
+    y = w1 * y2 - x1 * z2 + y1 * w2 + z1 * x2
+    z = w1 * z2 + x1 * y2 - y1 * x2 + z1 * w2
+    return (x, y, z, w)
 
 
 MID360_MOUNT_OFFSET_ROT: Tuple[float, float, float, float] = _mid360_mount_offset_rot()
@@ -130,79 +135,103 @@ class Mid360PatternCfg(PatternBaseCfg):
         return self._all_dirs
 
 
-class Mid360RayCaster(RayCaster):
-    """RayCaster casting a fresh random window of the Mid360 sequence per update.
+class _Mid360Mixin:
+    """Mid360 behaviour layered on top of the backend ray-caster (IsaacLab 3.0).
+
+    In 3.0 ``isaaclab.sensors.RayCaster`` is a factory that instantiates the backend class
+    (PhysX / OVPhysX / Newton) at construction time, so :class:`Mid360RayCaster` builds a
+    subclass ``(_Mid360Mixin, <backend RayCaster>)`` on the fly. Backend pose tracking
+    (``_get_view_transforms_wp`` + ``_offset_pos_wp`` / ``_offset_quat_wp``) is reused as is.
 
     Deviations from the base class (for the 20k-rays x many-envs scale):
 
-    * ray directions are stored once in the full table (no per-env ``repeat`` of
-      starts/directions: at 8k envs those two buffers alone would cost ~3.6 GB);
-    * rays always follow the full body orientation (``ray_alignment`` is
-      ignored — a body-mounted lidar has no meaningful yaw-only mode);
-    * the world-frame per-ray debug buffers (``_ray_starts_w`` /
-      ``_ray_directions_w``, used by play.py --viz_lidar) are only allocated
-      when ``cfg.keep_world_ray_buffers`` is set.
+    * ray directions are stored once in the full table (no per-env ``repeat``);
+    * rays always follow the full body orientation (``ray_alignment`` is ignored);
+    * per-ray world buffers (``_ray_starts_w`` / ``_ray_directions_w``) are only kept when
+      ``cfg.keep_world_ray_buffers`` is set (play.py --viz_lidar).
     """
 
-    cfg: Mid360RayCasterCfg
+    cfg: "Mid360RayCasterCfg"
 
     def _initialize_rays_impl(self):
         pattern: Mid360PatternCfg = self.cfg.pattern_cfg
+        n_env = self._view_count
         # full table with the mounting rotation baked in (world dirs then only need the body quat)
         all_dirs = pattern.load_table(self._device)
         offset_quat = torch.tensor(list(self.cfg.offset.rot), device=self._device)
         self._all_ray_dirs = quat_apply(offset_quat.expand(all_dirs.shape[0], 4), all_dirs)
-        self._offset_pos = torch.tensor(list(self.cfg.offset.pos), device=self._device)
+        self._offset_pos_cfg = torch.tensor(list(self.cfg.offset.pos), device=self._device)
         self._n_total_dirs = self._all_ray_dirs.shape[0]
         self._window_len = pattern.rays_per_scan
         self._decimation = pattern.ray_decimation
         self.num_rays = len(range(0, self._window_len, self._decimation))
-        # base-class buffers (drift kept for parity with RayCaster.reset)
-        self.drift = torch.zeros(self._view.count, 3, device=self.device)
-        self.ray_cast_drift = torch.zeros(self._view.count, 3, device=self.device)
-        self._data.pos_w = torch.zeros(self._view.count, 3, device=self.device)
-        self._data.quat_w = torch.zeros(self._view.count, 4, device=self.device)
-        self._data.ray_hits_w = torch.zeros(self._view.count, self.num_rays, 3, device=self.device)
+        # base-class buffers used by reset()
+        self.drift = ProxyArray(wp.zeros(n_env, dtype=wp.vec3f, device=self._device))
+        self.ray_cast_drift = ProxyArray(wp.zeros(n_env, dtype=wp.vec3f, device=self._device))
+        self._data.create_buffers(n_env, self.num_rays, self._device)
+        self._ray_starts_w_t = None
+        self._ray_directions_w_t = None
         if self.cfg.keep_world_ray_buffers:
-            self._ray_starts_w = torch.zeros(self._view.count, self.num_rays, 3, device=self.device)
-            self._ray_directions_w = torch.zeros(self._view.count, self.num_rays, 3, device=self.device)
+            self._ray_starts_w_t = torch.zeros(n_env, self.num_rays, 3, device=self._device)
+            self._ray_directions_w_t = torch.zeros(n_env, self.num_rays, 3, device=self._device)
 
-    def _update_buffers_impl(self, env_ids: Sequence[int]):
+    def _sensor_pose_torch(self, env_ids: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """World pose (pos, quat xyzw) of the sensor frame (before ``cfg.offset.rot``)."""
+        tf = wp.to_torch(self._get_view_transforms_wp()).reshape(-1, 7)[env_ids]
+        off_pos = wp.to_torch(self._offset_pos_wp).reshape(-1, 3)[env_ids]
+        off_quat = wp.to_torch(self._offset_quat_wp).reshape(-1, 4)[env_ids]
+        pos_w, quat_w = combine_frame_transforms(tf[:, :3], tf[:, 3:7], off_pos, off_quat)
+        pos_w = pos_w + quat_apply(quat_w, self._offset_pos_cfg.expand(pos_w.shape[0], 3))
+        return pos_w, quat_w
+
+    def _update_buffers_impl(self, env_mask: wp.array):
+        env_ids = wp.to_torch(env_mask).nonzero(as_tuple=False).squeeze(-1)
+        if env_ids.numel() == 0:
+            return
         # one random contiguous window per call, shared by the updated envs
         start = int(torch.randint(0, self._n_total_dirs - self._window_len + 1, (1,)).item())
         dirs = self._all_ray_dirs[start : start + self._window_len : self._decimation]  # (R, 3)
 
-        pos_w, quat_w = obtain_world_pose_from_view(self._view, env_ids)
-        pos_w, quat_w = combine_frame_transforms(
-            pos_w, quat_w, self._offset[0][env_ids], self._offset[1][env_ids]
-        )
-        pos_w = pos_w + quat_apply(quat_w, self._offset_pos.expand(pos_w.shape[0], 3))
-        pos_w = pos_w + self.drift[env_ids]
-        self._data.pos_w[env_ids] = pos_w
-        self._data.quat_w[env_ids] = quat_w
+        pos_w, quat_w = self._sensor_pose_torch(env_ids)
+        pos_w = pos_w + self.drift.torch[env_ids]
+        wp.to_torch(self._data._pos_w)[env_ids] = pos_w
+        wp.to_torch(self._data._quat_w)[env_ids] = quat_w
 
         n = pos_w.shape[0]
-        ray_dirs_w = quat_apply(
-            quat_w.repeat(1, self.num_rays), dirs.unsqueeze(0).expand(n, self.num_rays, 3)
-        )
+        # IsaacLab 3.0 quat_apply broadcasts the batch dims
+        ray_dirs_w = quat_apply(quat_w.unsqueeze(1), dirs.unsqueeze(0)).expand(n, self.num_rays, 3)
         ray_starts_w = pos_w.unsqueeze(1).expand(n, self.num_rays, 3).contiguous()
 
-        hits = raycast_mesh(
-            ray_starts_w,
-            ray_dirs_w,
-            max_dist=self.cfg.max_distance,
-            mesh=RayCaster.meshes[self.cfg.mesh_prim_paths[0]],
-        )[0]
-        hits[:, :, 2] += self.ray_cast_drift[env_ids, 2].unsqueeze(-1)
+        mesh = BaseRayCaster.meshes[(self.cfg.mesh_prim_paths[0], self._device)]
+        hits = raycast_mesh(ray_starts_w, ray_dirs_w.contiguous(), max_dist=self.cfg.max_distance, mesh=mesh)[0]
+        hits[:, :, 2] += self.ray_cast_drift.torch[env_ids, 2].unsqueeze(-1)
         hits = add_noise(
             hits, pos_w, ray_dirs_w, enable=self.cfg.enable_noise,
             drop_ratio=self.cfg.noise_drop_ratio, artifact_ratio=self.cfg.noise_artifact_ratio,
         )
-        self._data.ray_hits_w[env_ids] = hits
+        wp.to_torch(self._data._ray_hits_w)[env_ids] = hits
 
-        if self.cfg.keep_world_ray_buffers:
-            self._ray_starts_w[env_ids] = ray_starts_w
-            self._ray_directions_w[env_ids] = ray_dirs_w
+        if self._ray_starts_w_t is not None:
+            self._ray_starts_w_t[env_ids] = ray_starts_w
+            self._ray_directions_w_t[env_ids] = ray_dirs_w
+
+
+_MID360_CLASS_CACHE: dict[type, type] = {}
+
+
+class Mid360RayCaster:
+    """Ray-caster casting a fresh random window of the Mid360 sequence per update.
+
+    Factory: returns an instance of ``(_Mid360Mixin, <active backend RayCaster>)``.
+    """
+
+    def __new__(cls, cfg: "Mid360RayCasterCfg"):
+        base = RayCaster.resolve_class(cfg)
+        impl = _MID360_CLASS_CACHE.get(base)
+        if impl is None:
+            impl = type(f"Mid360RayCaster_{base.__module__.split('.')[0]}", (_Mid360Mixin, base), {})
+            _MID360_CLASS_CACHE[base] = impl
+        return impl(cfg)
 
 
 @configclass

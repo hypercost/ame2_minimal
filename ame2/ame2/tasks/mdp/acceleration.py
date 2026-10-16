@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import torch
+import warp as wp
 import weakref
 from dataclasses import MISSING
 from typing import TYPE_CHECKING, Any, Sequence
@@ -43,16 +44,18 @@ class BodyAccelerationSensor(SensorBase):
         self._update_outdated_buffers()
         return self._data
 
-    def reset(self, env_ids: Sequence[int] | None = None):
+    def reset(self, env_ids: Sequence[int] | None = None, env_mask: wp.array | None = None):
         """Resets the sensor internals."""
-        super().reset(env_ids)
+        super().reset(env_ids, env_mask)
+        if env_ids is None and env_mask is not None:
+            env_ids = wp.to_torch(env_mask).nonzero(as_tuple=False).squeeze(-1)
         if env_ids is None:
             env_ids = slice(None)
         
         # re-seed the finite-difference history from the current asset state
         if self._prev_pos is not None:
-            self._prev_pos[env_ids] = self._asset.data.body_pos_w[env_ids]
-            self._prev_vel[env_ids] = self._asset.data.body_lin_vel_w[env_ids]
+            self._prev_pos[env_ids] = self._asset.data.body_pos_w.torch[env_ids]
+            self._prev_vel[env_ids] = self._asset.data.body_lin_vel_w.torch[env_ids]
             # asset data still holds the pre-reset pose here, so the next 2 FD accelerations are spurious
             self._blank_steps[env_ids] = 2
 
@@ -69,7 +72,7 @@ class BodyAccelerationSensor(SensorBase):
         """Sets the asset to track and initializes buffers."""
         self._asset = asset
         
-        num_bodies = self._asset.data.body_pos_w.shape[1]
+        num_bodies = self._asset.data.body_pos_w.torch.shape[1]
         self._data.vel_w = torch.zeros(self._num_envs, num_bodies, 3, device=self._device)
         self._data.acc_w = torch.zeros(self._num_envs, num_bodies, 3, device=self._device)
         self._data.physx_acc_w = torch.zeros(self._num_envs, num_bodies, 3, device=self._device)
@@ -77,17 +80,23 @@ class BodyAccelerationSensor(SensorBase):
         self._prev_pos = torch.zeros(self._num_envs, num_bodies, 3, device=self._device)
         self._prev_vel = torch.zeros(self._num_envs, num_bodies, 3, device=self._device)
         
-        self._prev_pos[:] = self._asset.data.body_pos_w
-        self._prev_vel[:] = self._asset.data.body_lin_vel_w
+        self._prev_pos[:] = self._asset.data.body_pos_w.torch
+        self._prev_vel[:] = self._asset.data.body_lin_vel_w.torch
         self._blank_steps = torch.zeros(self._num_envs, dtype=torch.long, device=self._device)
 
-    def _update_buffers_impl(self, env_ids: Sequence[int]):
+    def _update_buffers_impl(self, env_mask: wp.array):
         """Fills the data buffer (called by the environment after decimation)."""
         if self._asset is None:
             return
-            
+        # IsaacLab 3.0: outdated envs arrive as a warp bool mask; timestamps are warp arrays
+        env_ids = wp.to_torch(env_mask).nonzero(as_tuple=False).squeeze(-1)
+        if env_ids.numel() == 0:
+            return
+
         # per-env time since the last sensor update
-        dt = (self._timestamp[env_ids] - self._timestamp_last_update[env_ids]).view(-1, 1, 1)
+        ts = wp.to_torch(self._timestamp)
+        ts_last = wp.to_torch(self._timestamp_last_update)
+        dt = (ts[env_ids] - ts_last[env_ids]).view(-1, 1, 1)
         
         # skip envs with dt ~ 0 (redundant updates)
         mask = (dt > 1e-6).flatten()
@@ -95,7 +104,7 @@ class BodyAccelerationSensor(SensorBase):
             valid_env_ids = env_ids[mask] if isinstance(env_ids, torch.Tensor) else [env_ids[i] for i, m in enumerate(mask) if m]
             valid_dt = dt[mask]
             
-            current_pos = self._asset.data.body_pos_w[valid_env_ids]
+            current_pos = self._asset.data.body_pos_w.torch[valid_env_ids]
             
             calc_vel = (current_pos - self._prev_pos[valid_env_ids]) / valid_dt
             
@@ -108,7 +117,7 @@ class BodyAccelerationSensor(SensorBase):
 
             self._data.vel_w[valid_env_ids] = calc_vel
             self._data.acc_w[valid_env_ids] = calc_acc
-            self._data.physx_acc_w[valid_env_ids] = self._asset.data.body_lin_acc_w[valid_env_ids]
+            self._data.physx_acc_w[valid_env_ids] = self._asset.data.body_lin_acc_w.torch[valid_env_ids]
             
             self._prev_pos[valid_env_ids] = current_pos
             self._prev_vel[valid_env_ids] = calc_vel

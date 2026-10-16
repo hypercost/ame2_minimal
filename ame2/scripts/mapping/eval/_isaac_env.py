@@ -1,4 +1,4 @@
-"""Isaac-side helpers shared by layers 3 / 4. Import only AFTER AppLauncher started Kit."""
+"""Isaac-side helpers shared by layers 3 / 4. Import only AFTER the simulation was launched."""
 
 from __future__ import annotations
 
@@ -16,9 +16,17 @@ EVAL_EVENTS_OFF = ("physics_material", "add_base_mass", "base_com", "randomize_a
 
 def make_eval_env(task: str, num_envs: int, device: str, seed: int, map_mode: str, mapping_model: str | None,
                   terrain: str | None = None, difficulty: float | None = None, video: bool = False,
-                  video_dir: str | None = None, video_length: int = 400):
-    """Student-style env with deterministic eval settings and the requested map mode."""
-    env_cfg = parse_env_cfg(task, device=device, num_envs=num_envs)
+                  video_dir: str | None = None, video_length: int = 400, env_cfg=None):
+    """Student-style env with deterministic eval settings and the requested map mode.
+
+    ``env_cfg``: an already resolved config (IsaacLab 3.0 scripts resolve presets via Hydra first).
+    """
+    if env_cfg is None:
+        env_cfg = parse_env_cfg(task, device=device, num_envs=num_envs)
+    else:
+        env_cfg.scene.num_envs = num_envs
+        if device is not None:
+            env_cfg.sim.device = device
     env_cfg.seed = seed
     if not hasattr(env_cfg.scene, "neural_map") or env_cfg.scene.neural_map is None:
         raise ValueError(f"{task} has no neural_map sensor; use a student task (e.g. Ame2-G1-Gaze-Student)")

@@ -77,7 +77,7 @@ def ame2_body_lin_acc_l1(
     
     key = (asset_cfg.name, tuple(body_ids) if isinstance(body_ids, list) else body_ids)
     if key not in env._ame2_mass_masks:
-        body_masses = asset.data.default_mass[:, body_ids]
+        body_masses = asset.data.default_mass.torch[:, body_ids]
         mass_mask = (body_masses >= 0.1).float().to(env.device)
         env._ame2_mass_masks[key] = mass_mask
 
@@ -91,7 +91,7 @@ def ame2_body_lin_acc_l1(
         body_accs = sensor.data.acc_w[:, body_ids, :]
     else:
         # fall back to the PhysX body acceleration
-        body_accs = asset.data.body_lin_acc_w[:, body_ids, :]
+        body_accs = asset.data.body_lin_acc_w.torch[:, body_ids, :]
         print('alert:using physx acceleration')
 
     return torch.sum(torch.norm(body_accs, dim=-1) * mass_mask, dim=1)
@@ -108,14 +108,14 @@ def ame2_joint_torques_l2(env: ManagerBasedRLEnv, asset_cfg: SceneEntityCfg = Sc
     """
     # extract the used quantities (to enable type-hinting)
     asset: Articulation = env.scene[asset_cfg.name]
-    return torch.sum(torch.square(asset.data.applied_torque[:, asset_cfg.joint_ids]), dim=1)
+    return torch.sum(torch.square(asset.data.applied_torque.torch[:, asset_cfg.joint_ids]), dim=1)
 
 
 def ame2_joint_vel_l1(env: ManagerBasedRLEnv, asset_cfg: SceneEntityCfg) -> torch.Tensor:
     """Penalize joint velocities on the articulation using an L1-kernel."""
     # extract the used quantities (to enable type-hinting)
     asset: Articulation = env.scene[asset_cfg.name]
-    return torch.sum(torch.abs(asset.data.joint_vel[:, asset_cfg.joint_ids]), dim=1)
+    return torch.sum(torch.abs(asset.data.joint_vel.torch[:, asset_cfg.joint_ids]), dim=1)
 
 
 def ame2_joint_vel_l2(env: ManagerBasedRLEnv, asset_cfg: SceneEntityCfg = SceneEntityCfg("robot")) -> torch.Tensor:
@@ -125,7 +125,7 @@ def ame2_joint_vel_l2(env: ManagerBasedRLEnv, asset_cfg: SceneEntityCfg = SceneE
     """
     # extract the used quantities (to enable type-hinting)
     asset: Articulation = env.scene[asset_cfg.name]
-    return torch.sum(torch.square(asset.data.joint_vel[:, asset_cfg.joint_ids]), dim=1)
+    return torch.sum(torch.square(asset.data.joint_vel.torch[:, asset_cfg.joint_ids]), dim=1)
 
 
 def ame2_joint_acc_l2(env: ManagerBasedRLEnv, asset_cfg: SceneEntityCfg = SceneEntityCfg("robot")) -> torch.Tensor:
@@ -135,14 +135,14 @@ def ame2_joint_acc_l2(env: ManagerBasedRLEnv, asset_cfg: SceneEntityCfg = SceneE
     """
     # extract the used quantities (to enable type-hinting)
     asset: Articulation = env.scene[asset_cfg.name]
-    return torch.sum(torch.square(asset.data.joint_acc[:, asset_cfg.joint_ids]), dim=1)
+    return torch.sum(torch.square(asset.data.joint_acc.torch[:, asset_cfg.joint_ids]), dim=1)
 
 
 def ame2_joint_deviation_l1(env: ManagerBasedRLEnv, asset_cfg: SceneEntityCfg = SceneEntityCfg("robot")) -> torch.Tensor:
     """Penalize joint positions that deviate from the default one."""
     # extract the used quantities (to enable type-hinting)
     asset: Articulation = env.scene[asset_cfg.name]
-    angle = asset.data.joint_pos[:, asset_cfg.joint_ids] - asset.data.default_joint_pos[:, asset_cfg.joint_ids]
+    angle = asset.data.joint_pos.torch[:, asset_cfg.joint_ids] - asset.data.default_joint_pos.torch[:, asset_cfg.joint_ids]
     return torch.sum(torch.abs(angle), dim=1)
 
 
@@ -166,7 +166,7 @@ def ame2_applied_torque_limits(env: ManagerBasedRLEnv, asset_cfg: SceneEntityCfg
     asset: Articulation = env.scene[asset_cfg.name]
     # compute out of limits constraints
     out_of_limits = torch.abs(
-        asset.data.applied_torque[:, asset_cfg.joint_ids] - asset.data.computed_torque[:, asset_cfg.joint_ids]
+        asset.data.applied_torque.torch[:, asset_cfg.joint_ids] - asset.data.computed_torque.torch[:, asset_cfg.joint_ids]
     )
     return torch.sum(out_of_limits, dim=1)
 
@@ -197,12 +197,12 @@ def ame2_move2goal(
     asset = env.scene[asset_cfg.name]
     if len(asset_cfg.body_ids) > 0:
         body_id = asset_cfg.body_ids[0]
-        vel_w = asset.data.body_lin_vel_w[:, body_id]
-        quat_w = asset.data.root_quat_w
+        vel_w = asset.data.body_lin_vel_w.torch[:, body_id]
+        quat_w = asset.data.root_quat_w.torch
         vel_b = quat_apply_inverse(quat_w, vel_w)
         vel_xy = vel_b[:, :2]
     else:
-        vel_xy = asset.data.root_lin_vel_b[:, :2]
+        vel_xy = asset.data.root_lin_vel_b.torch[:, :2]
     vel_norm = torch.norm(vel_xy, dim=1)
 
     # cos of the angle between velocity and goal direction
@@ -284,17 +284,17 @@ def ame2_standatgoal(
 
     # d_foot: proportion of feet not in contact
     # net_forces_w_history has shape (num_envs, history_length, num_bodies, 3)
-    net_forces = contact_sensor.data.net_forces_w_history[:, :, sensor_cfg.body_ids, :]
+    net_forces = contact_sensor.data.net_forces_w_history.torch[:, :, sensor_cfg.body_ids, :]
     contact_forces = torch.norm(net_forces, dim=-1).max(dim=1)[0]
     num_feet_in_contact = torch.sum((contact_forces > sensor_threshold).float(), dim=1)
     total_feet = len(sensor_cfg.body_ids)
     d_foot = (total_feet - num_feet_in_contact) / total_feet
 
     # d_g: base tilt, 1 - g_z^2 with g the projected gravity in the base frame
-    d_g = 1.0 - torch.square(asset.data.projected_gravity_b[:, 2])
+    d_g = 1.0 - torch.square(asset.data.projected_gravity_b.torch[:, 2])
 
     # d_q: mean deviation from standing reference (default joint positions)
-    diff_q = asset.data.joint_pos[:, asset_cfg.joint_ids] - asset.data.default_joint_pos[:, asset_cfg.joint_ids]
+    diff_q = asset.data.joint_pos.torch[:, asset_cfg.joint_ids] - asset.data.default_joint_pos.torch[:, asset_cfg.joint_ids]
     d_q = torch.mean(torch.abs(diff_q), dim=1)
 
     # r_stand = 1(at_goal) * exp(-(d_foot + d_g + d_q + d_xy) / 4)
@@ -310,12 +310,12 @@ def ame2_base_roll_rate_l2(env: ManagerBasedRLEnv, asset_cfg: SceneEntityCfg = S
     asset: RigidObject = env.scene[asset_cfg.name]
     if len(asset_cfg.body_ids) > 0:
         body_id = asset_cfg.body_ids[0]
-        ang_vel_w = asset.data.body_ang_vel_w[:, body_id]
-        quat_w = asset.data.body_link_quat_w[:, body_id]
+        ang_vel_w = asset.data.body_ang_vel_w.torch[:, body_id]
+        quat_w = asset.data.body_link_quat_w.torch[:, body_id]
         ang_vel_b = quat_apply_inverse(quat_w, ang_vel_w)
         return torch.square(ang_vel_b[:, 0])
     else:
-        return torch.square(asset.data.root_ang_vel_b[:, 0])
+        return torch.square(asset.data.root_ang_vel_b.torch[:, 0])
 
 
 def ame2_joint_regularization_l2(env: ManagerBasedRLEnv, asset_cfg: SceneEntityCfg = SceneEntityCfg("robot")) -> torch.Tensor:
@@ -326,11 +326,11 @@ def ame2_joint_regularization_l2(env: ManagerBasedRLEnv, asset_cfg: SceneEntityC
     # extract the used quantities
     asset: Articulation = env.scene[asset_cfg.name]
     # ||q_dot||^2
-    vel_sq = torch.sum(torch.square(asset.data.joint_vel[:, asset_cfg.joint_ids]), dim=1)
+    vel_sq = torch.sum(torch.square(asset.data.joint_vel.torch[:, asset_cfg.joint_ids]), dim=1)
     # ||tau||^2
-    torque_sq = torch.sum(torch.square(asset.data.applied_torque[:, asset_cfg.joint_ids]), dim=1)
+    torque_sq = torch.sum(torch.square(asset.data.applied_torque.torch[:, asset_cfg.joint_ids]), dim=1)
     # ||q_ddot||^2
-    acc_sq = torch.sum(torch.square(asset.data.joint_acc[:, asset_cfg.joint_ids]), dim=1)
+    acc_sq = torch.sum(torch.square(asset.data.joint_acc.torch[:, asset_cfg.joint_ids]), dim=1)
 
     return vel_sq + 0.01 * torque_sq + 0.001 * acc_sq
 
@@ -340,7 +340,7 @@ def ame2_link_contact_forces_l2(env: ManagerBasedRLEnv, sensor_cfg: SceneEntityC
     # extract the used quantities
     contact_sensor: ContactSensor = env.scene.sensors[sensor_cfg.name]
     # net_forces_w_history shape: (num_envs, history_length, num_bodies, 3)
-    net_forces = contact_sensor.data.net_forces_w_history[:, :, sensor_cfg.body_ids, :]
+    net_forces = contact_sensor.data.net_forces_w_history.torch[:, :, sensor_cfg.body_ids, :]
     # mean across history and then per-body norm
     contact_forces = torch.mean(torch.norm(net_forces, dim=-1), dim=1)
     # cap at 2 * robot_weight to limit outliers
@@ -358,10 +358,10 @@ def ame2_undesired_spinning(
     asset: Articulation = env.scene[asset_cfg.name]
     if len(asset_cfg.body_ids) == 1:
         # world-frame yaw rate of the selected body
-        yaw_rate = asset.data.body_ang_vel_w[:, asset_cfg.body_ids[0], 2].abs()
+        yaw_rate = asset.data.body_ang_vel_w.torch[:, asset_cfg.body_ids[0], 2].abs()
     else:
         # fallback to root angular velocity in base frame
-        yaw_rate = asset.data.root_ang_vel_b[:, 2].abs()
+        yaw_rate = asset.data.root_ang_vel_b.torch[:, 2].abs()
     return (yaw_rate > yaw_rate_thr).float()
 
 
@@ -381,7 +381,7 @@ def ame2_undesired_leaping(
     feet_sensor: ContactSensor = env.scene.sensors[feet_sensor_cfg.name]
     # check if all feet were off the ground at any physics step in the history window
     # net_forces_w_history shape: (num_envs, history_length, num_bodies, 3)
-    history_forces = torch.norm(feet_sensor.data.net_forces_w_history[:, :, feet_sensor_cfg.body_ids, :], dim=-1)
+    history_forces = torch.norm(feet_sensor.data.net_forces_w_history.torch[:, :, feet_sensor_cfg.body_ids, :], dim=-1)
     # any foot in contact per physics step: (num_envs, history_length)
     any_foot_in_contact = torch.any(history_forces > sensor_threshold, dim=2)
     # leaped: at least one time step in history had NO feet in contact: (num_envs)
@@ -389,7 +389,7 @@ def ame2_undesired_leaping(
 
     height_scanner: RayCaster = env.scene.sensors[height_scanner_cfg.name]
     # heights are in world frame (Z values)
-    heights = height_scanner.data.ray_hits_w[..., 2]
+    heights = height_scanner.data.ray_hits_w.torch[..., 2]
     # elevation range of the scan
     elevation_diff = torch.max(heights, dim=1)[0] - torch.min(heights, dim=1)[0]
 
@@ -404,7 +404,7 @@ def ame2_undesired_non_foot_contacts(
     """Count non-foot links in contact, plus new contacts if air time is tracked."""
     sensor: ContactSensor = env.scene.sensors[sensor_cfg.name]
 
-    forces = torch.max(torch.norm(sensor.data.net_forces_w_history[:, :, sensor_cfg.body_ids, :], dim=-1), dim=1)[0]
+    forces = torch.max(torch.norm(sensor.data.net_forces_w_history.torch[:, :, sensor_cfg.body_ids, :], dim=-1), dim=1)[0]
     count = torch.sum((forces > sensor_threshold).float(), dim=1)
     if sensor.cfg.track_air_time:
         first_contacts = sensor.compute_first_contact(env.step_dt)
@@ -419,9 +419,9 @@ def ame2_undesired_stumbling(
     """Count links whose horizontal contact force exceeds 1.1 * vertical force + 1 N."""
     sensor: ContactSensor = env.scene.sensors[sensor_cfg.name]
 
-    forces = sensor.data.net_forces_w[:, sensor_cfg.body_ids, :]
-    f_xy = torch.max(torch.norm(sensor.data.net_forces_w_history[:, :, sensor_cfg.body_ids, :2], dim=-1), dim=1)[0]
-    f_z = torch.max(sensor.data.net_forces_w_history[:, :, sensor_cfg.body_ids, 2], dim=1)[0]
+    forces = sensor.data.net_forces_w.torch[:, sensor_cfg.body_ids, :]
+    f_xy = torch.max(torch.norm(sensor.data.net_forces_w_history.torch[:, :, sensor_cfg.body_ids, :2], dim=-1), dim=1)[0]
+    f_z = torch.max(sensor.data.net_forces_w_history.torch[:, :, sensor_cfg.body_ids, 2], dim=1)[0]
     stumbling = f_xy > (1.1 * f_z + 1.0)
     return torch.sum(stumbling.float(), dim=1)
 
@@ -442,11 +442,13 @@ def ame2_undesired_slippage(
     # map sensor body names to asset indices once and cache them on the env
     if not hasattr(env, "_ame2_slip_asset_ids"):
         env._ame2_slip_asset_ids = {}
-    key = (sensor_cfg.name, asset_cfg.name,
-           tuple(sensor_cfg.body_ids) if isinstance(sensor_cfg.body_ids, list) else "all")
+    # IsaacLab 3.0: resolved sensor body_ids may be a torch.Tensor
+    sel = sensor_cfg.body_ids
+    sel = sel.tolist() if isinstance(sel, torch.Tensor) else sel
+    key = (sensor_cfg.name, asset_cfg.name, tuple(sel) if isinstance(sel, (list, tuple)) else "all")
     if key not in env._ame2_slip_asset_ids:
-        if isinstance(sensor_cfg.body_ids, list):
-            names = [sensor.body_names[i] for i in sensor_cfg.body_ids]
+        if isinstance(sel, (list, tuple)):
+            names = [sensor.body_names[i] for i in sel]
         else:
             names = list(sensor.body_names)
         asset_ids = [asset.body_names.index(n) for n in names]
@@ -455,10 +457,10 @@ def ame2_undesired_slippage(
 
     # ignore brief contacts (e.g. impact velocity at touchdown)
     # current_contact_time shape: (num_envs, num_bodies_in_sensor)
-    contact_time = sensor.data.current_contact_time[:, sensor_cfg.body_ids]
+    contact_time = sensor.data.current_contact_time.torch[:, sensor_cfg.body_ids]
     in_contact = contact_time > contact_time_thr
     # horizontal velocity only; vertical motion is not slip
-    body_vels = torch.norm(asset.data.body_lin_vel_w[:, asset_body_ids, :2], dim=-1)
+    body_vels = torch.norm(asset.data.body_lin_vel_w.torch[:, asset_body_ids, :2], dim=-1)
     slipping = in_contact & (body_vels > slip_vel_thr)
     return torch.sum(slipping.float(), dim=1)
 
@@ -475,7 +477,7 @@ def ame2_undesired_self_collision(
     """
     sensor: ContactSensor = env.scene.sensors[sensor_cfg.name]
     # force_matrix_w_history: (N, T, B, M, 3) with M filter bodies
-    fm = sensor.data.force_matrix_w_history[:, :, sensor_cfg.body_ids, :, :]
+    fm = sensor.data.force_matrix_w_history.torch[:, :, sensor_cfg.body_ids, :, :]
     # norm over xyz, sum over M, max over history T -> (N, B)
     forces = torch.norm(fm, dim=-1).sum(dim=-1).max(dim=1)[0]
 
@@ -490,7 +492,7 @@ def ame2_undesired_self_col_foot_distance(
     """Indicator for feet being too close to each other: min pairwise distance < thr."""
     asset: Articulation = env.scene[asset_cfg.name]
     # feet positions: (num_envs, num_feet, 3)
-    feet_pos = asset.data.body_pos_w[:, asset_cfg.body_ids, :]
+    feet_pos = asset.data.body_pos_w.torch[:, asset_cfg.body_ids, :]
     # pairwise distances: (num_envs, num_feet, num_feet)
     dists = torch.cdist(feet_pos, feet_pos)
     # mask diagonal
@@ -511,11 +513,11 @@ def ame2_joint_pos_limits(
     Formula: sum(max(0, q - 0.95 * q_max, 0.95 * q_min - q)) where q_min/q_max are hard limits.
     """
     asset: Articulation = env.scene[asset_cfg.name]
-    limits = asset.data.joint_pos_limits
+    limits = asset.data.joint_pos_limits.torch
     q_min, q_max = limits[..., 0], limits[..., 1]
     
-    violation_max = asset.data.joint_pos - 0.95 * q_max
-    violation_min = 0.95 * q_min - asset.data.joint_pos
+    violation_max = asset.data.joint_pos.torch - 0.95 * q_max
+    violation_min = 0.95 * q_min - asset.data.joint_pos.torch
     violation = torch.clamp(violation_max, min=0.0) + torch.clamp(violation_min, min=0.0)
     return torch.sum(violation, dim=1)
 
@@ -537,7 +539,7 @@ def ame2_joint_vel_limits(
     key = asset_cfg.name
     if key not in env._ame2_vel_limits:
         # limits from the actuator models: (num_envs, num_joints)
-        q_vel_max = torch.zeros_like(asset.data.joint_vel)
+        q_vel_max = torch.zeros_like(asset.data.joint_vel.torch)
         for actuator in asset.actuators.values():
             if hasattr(actuator, "velocity_limit"):
                 # (num_envs, num_joints_in_actuator)
@@ -547,7 +549,7 @@ def ame2_joint_vel_limits(
 
     q_vel_max = env._ame2_vel_limits[key]
     
-    violation = asset.data.joint_vel.abs() - 0.9 * q_vel_max
+    violation = asset.data.joint_vel.torch.abs() - 0.9 * q_vel_max
     return torch.sum(torch.clamp(violation, min=0.0), dim=1)
 
 
@@ -568,7 +570,7 @@ def ame2_joint_torque_limits(
     key = asset_cfg.name
     if key not in env._ame2_torque_limits:
         # limits from the actuator models: (num_envs, num_joints)
-        torque_limits = torch.zeros_like(asset.data.applied_torque)
+        torque_limits = torch.zeros_like(asset.data.applied_torque.torch)
         for actuator in asset.actuators.values():
             if hasattr(actuator, "effort_limit"):
                 # (num_envs, num_joints_in_actuator)
@@ -578,7 +580,7 @@ def ame2_joint_torque_limits(
 
     torque_limits = env._ame2_torque_limits[key]
     
-    violation = asset.data.applied_torque.abs() - 0.8 * torque_limits
+    violation = asset.data.applied_torque.torch.abs() - 0.8 * torque_limits
     return torch.sum(torch.clamp(violation, min=0.0), dim=1)
 
 def ame2_optional_uppershaping(
@@ -593,12 +595,12 @@ def ame2_optional_uppershaping(
     """
     # scan elevation range, as in ame2_undesired_leaping
     height_scanner: RayCaster = env.scene.sensors[height_scanner_cfg.name]
-    heights = height_scanner.data.ray_hits_w[..., 2]
+    heights = height_scanner.data.ray_hits_w.torch[..., 2]
     elevation_diff = torch.max(heights, dim=1)[0] - torch.min(heights, dim=1)[0]
 
     # joint deviation (sum of squares)
     asset: Articulation = env.scene[asset_cfg.name]
-    diff_q = asset.data.joint_pos[:, asset_cfg.joint_ids] - asset.data.default_joint_pos[:, asset_cfg.joint_ids]
+    diff_q = asset.data.joint_pos.torch[:, asset_cfg.joint_ids] - asset.data.default_joint_pos.torch[:, asset_cfg.joint_ids]
     sse = torch.sum(torch.square(diff_q), dim=1)
 
     multiplier = torch.where(elevation_diff < elevation_thr, 1.0, 0.1)
@@ -619,24 +621,24 @@ def ame2_optional_foot_yaw(
     # torso yaw (first matched body, else root)
     if isinstance(torso_cfg.body_ids, (list, tuple, torch.Tensor)) and len(torso_cfg.body_ids) > 0:
         torso_id = torso_cfg.body_ids[0]
-        torso_quat = asset.data.body_link_quat_w[:, torso_id]
+        torso_quat = asset.data.body_link_quat_w.torch[:, torso_id]
     else:
-        torso_quat = asset.data.root_quat_w
+        torso_quat = asset.data.root_quat_w.torch
 
-    # yaw-only quaternion (w, 0, 0, z) -> yaw = 2 * atan2(z, w)
+    # yaw-only quaternion (0, 0, z, w) [IsaacLab 3.0 xyzw] -> yaw = 2 * atan2(z, w)
     t_yaw_q = yaw_quat(torso_quat)
-    t_yaw = 2.0 * torch.atan2(t_yaw_q[:, 3], t_yaw_q[:, 0])
+    t_yaw = 2.0 * torch.atan2(t_yaw_q[:, 2], t_yaw_q[:, 3])
 
     # feet yaw
-    feet_quat = asset.data.body_link_quat_w[:, asset_cfg.body_ids]
+    feet_quat = asset.data.body_link_quat_w.torch[:, asset_cfg.body_ids]
     f_yaw_q = yaw_quat(feet_quat)
     # f_yaw_q: (N, num_feet, 4)
-    f_yaw = 2.0 * torch.atan2(f_yaw_q[..., 3], f_yaw_q[..., 0])
+    f_yaw = 2.0 * torch.atan2(f_yaw_q[..., 2], f_yaw_q[..., 3])
 
     yaw_diff = wrap_to_pi(f_yaw - t_yaw.unsqueeze(1))
     penalty = torch.sum(torch.square(yaw_diff), dim=1)
 
-    lin_vel_x = asset.data.root_lin_vel_b[:, 0].abs()
+    lin_vel_x = asset.data.root_lin_vel_b.torch[:, 0].abs()
 
     return penalty * ( 0.1 + 0.9 * (lin_vel_x > lin_vel_thr).float())
 
@@ -652,15 +654,15 @@ def ame2_optional_torsoshaping(
     Returns 1 - g_z^2 of the torso frame, zeroed when the scan elevation range is >= elevation_thr.
     """
     height_scanner: RayCaster = env.scene.sensors[height_scanner_cfg.name]
-    heights = height_scanner.data.ray_hits_w[..., 2]
+    heights = height_scanner.data.ray_hits_w.torch[..., 2]
     elevation_diff = torch.max(heights, dim=1)[0] - torch.min(heights, dim=1)[0]
 
     asset: Articulation = env.scene[asset_cfg.name]
     if len(asset_cfg.body_ids) > 0:
         body_id = asset_cfg.body_ids[0]
-        quat_w = asset.data.body_link_quat_w[:, body_id]
+        quat_w = asset.data.body_link_quat_w.torch[:, body_id]
     else:
-        quat_w = asset.data.root_quat_w
+        quat_w = asset.data.root_quat_w.torch
 
     gravity_w = torch.tensor([0.0, 0.0, -1.0], device=env.device).repeat(env.num_envs, 1)
     gravity_b = quat_apply_inverse(quat_w, gravity_w)
@@ -697,15 +699,15 @@ def ame2_optional_front_hind_reg(
     right_idx_asset = [asset.body_names.index(f) for f in right_pair]
 
     # max force over history
-    forces = torch.max(torch.norm(sensor.data.net_forces_w_history, dim=-1), dim=1)[0]
+    forces = torch.max(torch.norm(sensor.data.net_forces_w_history.torch, dim=-1), dim=1)[0]
     
     left_in_air = (forces[:, left_idx_sens[0]] < sensor_threshold) & (forces[:, left_idx_sens[1]] < sensor_threshold)
     right_in_air = (forces[:, right_idx_sens[0]] < sensor_threshold) & (forces[:, right_idx_sens[1]] < sensor_threshold)
     
     pacing = left_in_air | right_in_air
 
-    left_dist = torch.norm(asset.data.body_pos_w[:, left_idx_asset[0]] - asset.data.body_pos_w[:, left_idx_asset[1]], dim=-1)
-    right_dist = torch.norm(asset.data.body_pos_w[:, right_idx_asset[0]] - asset.data.body_pos_w[:, right_idx_asset[1]], dim=-1)
+    left_dist = torch.norm(asset.data.body_pos_w.torch[:, left_idx_asset[0]] - asset.data.body_pos_w.torch[:, left_idx_asset[1]], dim=-1)
+    right_dist = torch.norm(asset.data.body_pos_w.torch[:, right_idx_asset[0]] - asset.data.body_pos_w.torch[:, right_idx_asset[1]], dim=-1)
     
     left_close = left_dist < dist_thr
     right_close = right_dist < dist_thr
