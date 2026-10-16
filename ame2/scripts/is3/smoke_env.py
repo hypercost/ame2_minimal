@@ -40,6 +40,8 @@ with launch_simulation(env_cfg, args):
     if args.debug:
         sc = u.scene if False else env.unwrapped.scene
         cs = sc["contact_forces"]; rb = sc["robot"]
+        print("[dbg] JOINTS", rb.joint_names, flush=True)
+        print("[dbg] DEFQ", rb.data.default_joint_pos.torch[0].tolist(), flush=True)
         print("[dbg] robot bodies", rb.num_bodies, rb.body_names, flush=True)
         print("[dbg] contact bodies", len(cs.body_names), cs.body_names, flush=True)
         t = env.unwrapped.reward_manager.get_term_cfg("undesired_slippage")
