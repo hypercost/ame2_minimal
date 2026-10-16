@@ -198,7 +198,8 @@ class _Mid360Mixin:
         wp.to_torch(self._data._quat_w)[env_ids] = quat_w
 
         n = pos_w.shape[0]
-        ray_dirs_w = quat_apply(quat_w.repeat(1, self.num_rays), dirs.unsqueeze(0).expand(n, self.num_rays, 3))
+        # IsaacLab 3.0 quat_apply broadcasts the batch dims
+        ray_dirs_w = quat_apply(quat_w.unsqueeze(1), dirs.unsqueeze(0)).expand(n, self.num_rays, 3)
         ray_starts_w = pos_w.unsqueeze(1).expand(n, self.num_rays, 3).contiguous()
 
         mesh = BaseRayCaster.meshes[(self.cfg.mesh_prim_paths[0], self._device)]
